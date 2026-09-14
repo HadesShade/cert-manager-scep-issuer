@@ -116,13 +116,13 @@ type IssuerSpec struct {
 	// +kubebuilder:validation:Required
 	EnrollmentMode EnrollmentMode `json:"enrollmentMode"`
 
-	//+optional
+	// +optional
 	ChallengeSecretRef *ChallengeSecretRef `json:"challengeSecretRef,omitempty"`
 
-	//+optional
+	// +optional
 	DelegatedSignerConfiguration *DelegatedSignerConfiguration `json:"delegatedSignerConfiguration,omitempty"`
 
-	//+optional
+	// +optional
 	DelegatedSignerSecretName *string `json:"delegatedSignerSecretName,omitempty"`
 
 	// A reference to a Secret in the same namespace as the referent. If the

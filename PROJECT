@@ -5,22 +5,22 @@
 domain: hshade.io
 layout:
 - go.kubebuilder.io/v4
-projectName: sample-external-issuer
-repo: github.com/cert-manager/sample-external-issuer
+projectName: cert-manager-scep-issuer
+repo: github.com/HadesShade/cert-manager-scep-issuer
 resources:
 - api:
-    crdVersion: v1
+    crdVersion: v1alpha1
     namespaced: true
-  domain: example.com
+  domain: hshade.io
   group: scep
   kind: Issuer
-  path: github.com/cert-manager/sample-external-issuer/api/v1alpha1
+  path: github.com/HadesShade/cert-manager-scep-issuer/api/v1alpha1
   version: v1alpha1
 - api:
-    crdVersion: v1
-  domain: example.com
+    crdVersion: v1alpha1
+  domain: hshade.io
   group: scep
   kind: ClusterIssuer
-  path: github.com/cert-manager/sample-external-issuer/api/v1alpha1
+  path: github.com/HadesShade/cert-manager-scep-issuer/api/v1alpha1
   version: v1alpha1
-version: "3"
+version: "v0.1.0"

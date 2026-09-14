@@ -1,11 +1,3 @@
 aliases:
-  cm-maintainers:
-    - munnerz
-    - joshvanl
-    - wallrj
-    - jakexks
-    - maelvls
-    - sgtcodfish
-    - inteon
-    - thatsmrtalbot
-    - erikgb
+  cmsi-maintainers:
+    - hadesshade

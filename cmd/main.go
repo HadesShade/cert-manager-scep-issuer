@@ -25,8 +25,6 @@ import (
 	"os"
 	"path/filepath"
 
-	api "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
-
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -256,7 +254,10 @@ func main() {
 	defer cancel()
 
 	if err = (&controllers.Issuer{
-		HealthCheckerBuilder: func(issuerSpec *api.IssuerSpec, secretData map[string][]byte) (controllers.HealthChecker, error) {
+		HealthCheckerBuilder: func(
+			issuerSpec *issuerv1alpha1.IssuerSpec,
+			secretData map[string][]byte,
+		) (controllers.HealthChecker, error) {
 			return &noopHealthChecker{}, nil
 		},
 		SignerBuilder:            signer.NewSCEPSignerBuilder(),
