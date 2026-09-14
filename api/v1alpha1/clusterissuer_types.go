@@ -32,8 +32,8 @@ import (
 // +kubebuilder:printcolumn:name="Generation",type="integer",JSONPath=".metadata.generation"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// SampleClusterIssuer is the Schema for the sampleclusterissuers API.
-type SampleClusterIssuer struct {
+// ClusterIssuer is the Schema for the clusterissuers API.
+type ClusterIssuer struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
@@ -41,7 +41,7 @@ type SampleClusterIssuer struct {
 	Status v1alpha1.IssuerStatus `json:"status,omitempty"`
 }
 
-func (vi *SampleClusterIssuer) GetConditions() []metav1.Condition {
+func (vi *ClusterIssuer) GetConditions() []metav1.Condition {
 	return vi.Status.Conditions
 }
 
@@ -53,20 +53,20 @@ func (vi *SampleClusterIssuer) GetConditions() []metav1.Condition {
 // "<issuer resource (plural)>.<issuer group>". For example, the value
 // "simpleclusterissuers.issuer.cert-manager.io" will match all CSRs
 // with an issuerName set to eg. "simpleclusterissuers.issuer.cert-manager.io/issuer1".
-func (vi *SampleClusterIssuer) GetIssuerTypeIdentifier() string {
+func (vi *ClusterIssuer) GetIssuerTypeIdentifier() string {
 	// ACTION REQUIRED: Change this to a unique string that identifies your cluster issuer
-	return "sampleclusterissuers.sample-issuer.example.com"
+	return "clusterissuers.scep.hshade.io"
 }
 
 // issuer-lib requires that we implement the Issuer interface
 // so that it can interact with our Issuer resource.
-var _ v1alpha1.Issuer = &SampleClusterIssuer{}
+var _ v1alpha1.Issuer = &ClusterIssuer{}
 
 // +kubebuilder:object:root=true
 
-// SampleClusterIssuerList contains a list of SampleClusterIssuer.
-type SampleClusterIssuerList struct {
+// ClusterIssuerList contains a list of ClusterIssuer.
+type ClusterIssuerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []SampleClusterIssuer `json:"items"`
+	Items           []ClusterIssuer `json:"items"`
 }

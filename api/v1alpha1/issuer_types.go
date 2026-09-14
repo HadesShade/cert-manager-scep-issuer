@@ -19,7 +19,69 @@ package v1alpha1
 import (
 	"github.com/cert-manager/issuer-lib/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	// cmapi "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 )
+
+// +kubebuilder:validation:Enum=Delegated;Direct
+type EnrollmentMode string
+
+const (
+	ConditionTypeReady       string = "Ready"
+	ReasonVerified           string = "Verified"
+	ReasonRABootstrapPending string = "RABootstrapPending"
+	ReasonConfigurationError string = "ConfigurationError"
+	ReasonSecretNotFound     string = "SecretNotFound"
+	ReasonSCEPClientError    string = "SCEPClientError"
+	ReasonRAEnrollmentFailed string = "RAEnrollmentFailed"
+
+	Delegated EnrollmentMode = "Delegated"
+	Direct    EnrollmentMode = "Direct"
+)
+
+type ChallengeSecretRef struct {
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	Key string `json:"key"`
+}
+
+// X509Subject defines the standard X.509 subject attributes.
+type X509Subject struct {
+	// +optional
+	Organizations []string `json:"organizations,omitempty"`
+
+	// +optional
+	Countries []string `json:"countries,omitempty"`
+
+	// +optional
+	OrganizationalUnits []string `json:"organizationalUnits,omitempty"`
+}
+
+type DelegatedSignerConfiguration struct {
+	// +kubebuilder:validation:Required
+	CommonName string `json:"commonName"`
+
+	// +optional
+	DNSNames []string `json:"dnsNames,omitempty"`
+
+	// +optional
+	Subject *X509Subject `json:"subject,omitempty"`
+
+	// +kubebuilder:default="1080h"
+	// +optional
+	Duration *metav1.Duration `json:"duration,omitempty"`
+
+	// +optional
+	RenewalWindow *metav1.Duration `json:"renewalWindow,omitempty"`
+}
+
+type IssuerStatus struct {
+	v1alpha1.IssuerStatus `json:",inline"`
+
+	// +optional
+	NotAfter *metav1.Time `json:"notAfter,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -31,30 +93,47 @@ import (
 // +kubebuilder:printcolumn:name="Generation",type="integer",JSONPath=".metadata.generation"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// SampleIssuer is the Schema for the sampleissuers API.
-type SampleIssuer struct {
+// Issuer is the Schema for the issuers API.
+type Issuer struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   IssuerSpec            `json:"spec,omitempty"`
-	Status v1alpha1.IssuerStatus `json:"status,omitempty"`
+	Spec   IssuerSpec   `json:"spec,omitempty"`
+	Status IssuerStatus `json:"status,omitempty"`
 }
 
-// IssuerSpec defines the desired state of SampleIssuer
+// IssuerSpec defines the desired state of Issuer
 type IssuerSpec struct {
 	// URL is the base URL for the endpoint of the signing service,
 	// for example: "https://sample-signer.example.com/api".
+	// +kubebuilder:validation:Required
 	URL string `json:"url"`
 
+	// +kubebuilder:default=false
+	// +optional
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+
+	// +kubebuilder:validation:Required
+	EnrollmentMode EnrollmentMode `json:"enrollmentMode"`
+
+	//+optional
+	ChallengeSecretRef *ChallengeSecretRef `json:"challengeSecretRef,omitempty"`
+
+	//+optional
+	DelegatedSignerConfiguration *DelegatedSignerConfiguration `json:"delegatedSignerConfiguration,omitempty"`
+
+	//+optional
+	DelegatedSignerSecretName *string `json:"delegatedSignerSecretName,omitempty"`
+
 	// A reference to a Secret in the same namespace as the referent. If the
-	// referent is a SampleClusterIssuer, the reference instead refers to the resource
+	// referent is a ClusterIssuer, the reference instead refers to the resource
 	// with the given name in the configured 'cluster resource namespace', which
 	// is set as a flag on the controller component (and defaults to the
 	// namespace that the controller runs in).
-	AuthSecretName string `json:"authSecretName"`
+	// AuthSecretName string `json:"authSecretName"`
 }
 
-func (vi *SampleIssuer) GetConditions() []metav1.Condition {
+func (vi *Issuer) GetConditions() []metav1.Condition {
 	return vi.Status.Conditions
 }
 
@@ -66,20 +145,20 @@ func (vi *SampleIssuer) GetConditions() []metav1.Condition {
 // "<issuer resource (plural)>.<issuer group>". For example, the value
 // "simpleclusterissuers.issuer.cert-manager.io" will match all CSRs
 // with an issuerName set to eg. "simpleclusterissuers.issuer.cert-manager.io/issuer1".
-func (vi *SampleIssuer) GetIssuerTypeIdentifier() string {
+func (vi *Issuer) GetIssuerTypeIdentifier() string {
 	// ACTION REQUIRED: Change this to a unique string that identifies your issuer
-	return "sampleissuers.sample-issuer.example.com"
+	return "issuers.scep.hshade.io"
 }
 
 // issuer-lib requires that we implement the Issuer interface
 // so that it can interact with our Issuer resource.
-var _ v1alpha1.Issuer = &SampleIssuer{}
+var _ v1alpha1.Issuer = &Issuer{}
 
 // +kubebuilder:object:root=true
 
-// SampleIssuerList contains a list of SampleIssuer.
-type SampleIssuerList struct {
+// IssuerList contains a list of Issuer.
+type IssuerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []SampleIssuer `json:"items"`
+	Items           []Issuer `json:"items"`
 }

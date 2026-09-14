@@ -2,7 +2,7 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: example.com
+domain: hshade.io
 layout:
 - go.kubebuilder.io/v4
 projectName: sample-external-issuer
@@ -12,15 +12,15 @@ resources:
     crdVersion: v1
     namespaced: true
   domain: example.com
-  group: sample-issuer
-  kind: SampleIssuer
+  group: scep
+  kind: Issuer
   path: github.com/cert-manager/sample-external-issuer/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
   domain: example.com
-  group: sample-issuer
-  kind: SampleClusterIssuer
+  group: scep
+  kind: ClusterIssuer
   path: github.com/cert-manager/sample-external-issuer/api/v1alpha1
   version: v1alpha1
 version: "3"

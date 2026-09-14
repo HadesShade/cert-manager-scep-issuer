@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/cert-manager/sample-external-issuer/test/utils"
+	"github.com/hadesshade/cert-manager-scep-issuer/test/utils"
 )
 
 var (

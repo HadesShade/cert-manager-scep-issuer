@@ -9,8 +9,12 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - cert-manager.io
@@ -43,8 +47,8 @@ rules:
 - apiGroups:
   - certificates.k8s.io
   resourceNames:
-  - sampleclusterissuers.sample-issuer.example.com/*
-  - sampleissuers.sample-issuer.example.com/*
+  - clusterissuers.scep.hshade.io/*
+  - issuers.scep.hshade.io/*
   resources:
   - signers
   verbs:
@@ -57,18 +61,18 @@ rules:
   - create
   - patch
 - apiGroups:
-  - sample-issuer.example.com
+  - scep.hshade.io
   resources:
-  - sampleclusterissuers
-  - sampleissuers
+  - clusterissuers
+  - issuers
   verbs:
   - get
   - list
   - watch
 - apiGroups:
-  - sample-issuer.example.com
+  - scep.hshade.io
   resources:
-  - sampleclusterissuers/status
-  - sampleissuers/status
+  - clusterissuers/status
+  - issuers/status
   verbs:
   - patch

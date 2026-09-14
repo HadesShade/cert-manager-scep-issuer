@@ -1,7 +1,7 @@
 # This rule is not used by the project sample-external-issuer itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants read-only access to sample-issuer.example.com resources.
+# Grants read-only access to scep.hshade.io resources.
 # This role is intended for users who need visibility into these resources
 # without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
 
@@ -11,19 +11,19 @@ metadata:
   labels:
     app.kubernetes.io/name: sample-external-issuer
     app.kubernetes.io/managed-by: kustomize
-  name: sampleissuer-viewer-role
+  name: issuer-viewer-role
 rules:
 - apiGroups:
-  - sample-issuer.example.com
+  - scep.hshade.io
   resources:
-  - sampleissuers
+  - issuers
   verbs:
   - get
   - list
   - watch
 - apiGroups:
-  - sample-issuer.example.com
+  - scep.hshade.io
   resources:
-  - sampleissuers/status
+  - issuers/status
   verbs:
   - get

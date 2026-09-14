@@ -1,8 +1,8 @@
-# permissions to approve all sample-issuer.example.com requests
+# permissions to approve all scep.hshade.io requests
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: cert-manager-controller-approve:sample-issuer-example-com
+  name: cert-manager-controller-approve:scep-hshade-io
 rules:
 - apiGroups:
   - cert-manager.io
@@ -11,5 +11,5 @@ rules:
   verbs:
   - approve
   resourceNames:
-  - sampleissuers.sample-issuer.example.com/*
-  - sampleclusterissuers.sample-issuer.example.com/*
+  - issuers.scep.hshade.io/*
+  - clusterissuers.scep.hshade.io/*

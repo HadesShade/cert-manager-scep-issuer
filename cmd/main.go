@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 
+	api "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -42,11 +44,11 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/cert-manager/sample-external-issuer/internal/controllers"
-	"github.com/cert-manager/sample-external-issuer/internal/signer"
-	"github.com/cert-manager/sample-external-issuer/internal/version"
+	"github.com/hadesshade/cert-manager-scep-issuer/internal/controllers"
+	"github.com/hadesshade/cert-manager-scep-issuer/internal/signer"
+	"github.com/hadesshade/cert-manager-scep-issuer/internal/version"
 
-	sampleissuerv1alpha1 "github.com/cert-manager/sample-external-issuer/api/v1alpha1"
+	issuerv1alpha1 "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -57,11 +59,17 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+type noopHealthChecker struct{}
+
+func (n *noopHealthChecker) Check() error {
+	return nil
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(cmapi.AddToScheme(scheme))
 
-	utilruntime.Must(sampleissuerv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(issuerv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -248,8 +256,10 @@ func main() {
 	defer cancel()
 
 	if err = (&controllers.Issuer{
-		HealthCheckerBuilder:     signer.ExampleHealthCheckerFromIssuerAndSecretData,
-		SignerBuilder:            signer.ExampleSignerFromIssuerAndSecretData,
+		HealthCheckerBuilder: func(issuerSpec *api.IssuerSpec, secretData map[string][]byte) (controllers.HealthChecker, error) {
+			return &noopHealthChecker{}, nil
+		},
+		SignerBuilder:            signer.NewSCEPSignerBuilder(),
 		ClusterResourceNamespace: clusterResourceNamespace,
 	}).SetupWithManager(ctx, mgr); err != nil {
 		setupLog.Error(err, "unable to create Signer controllers")

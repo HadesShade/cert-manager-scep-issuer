@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.1
-  name: sampleissuers.sample-issuer.example.com
+  name: issuers.scep.hshade.io
 spec:
-  group: sample-issuer.example.com
+  group: scep.hshade.io
   names:
-    kind: SampleIssuer
-    listKind: SampleIssuerList
-    plural: sampleissuers
-    singular: sampleissuer
+    kind: Issuer
+    listKind: IssuerList
+    plural: issuers
+    singular: issuer
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -39,7 +39,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SampleIssuer is the Schema for the sampleissuers API.
+        description: Issuer is the Schema for the issuers API.
         properties:
           apiVersion:
             description: |-
@@ -59,23 +59,67 @@ spec:
           metadata:
             type: object
           spec:
-            description: IssuerSpec defines the desired state of SampleIssuer
+            description: IssuerSpec defines the desired state of Issuer
             properties:
-              authSecretName:
-                description: |-
-                  A reference to a Secret in the same namespace as the referent. If the
-                  referent is a SampleClusterIssuer, the reference instead refers to the resource
-                  with the given name in the configured 'cluster resource namespace', which
-                  is set as a flag on the controller component (and defaults to the
-                  namespace that the controller runs in).
+              challengeSecretRef:
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              delegatedSignerConfiguration:
+                properties:
+                  commonName:
+                    type: string
+                  dnsNames:
+                    items:
+                      type: string
+                    type: array
+                  duration:
+                    default: 1080h
+                    type: string
+                  renewalWindow:
+                    type: string
+                  subject:
+                    description: X509Subject defines the standard X.509 subject attributes.
+                    properties:
+                      countries:
+                        items:
+                          type: string
+                        type: array
+                      organizationalUnits:
+                        items:
+                          type: string
+                        type: array
+                      organizations:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                required:
+                - commonName
+                type: object
+              delegatedSignerSecretName:
                 type: string
+              enrollmentMode:
+                enum:
+                - Delegated
+                - Direct
+                type: string
+              insecureSkipVerify:
+                default: false
+                type: boolean
               url:
                 description: |-
                   URL is the base URL for the endpoint of the signing service,
                   for example: "https://sample-signer.example.com/api".
                 type: string
             required:
-            - authSecretName
+            - enrollmentMode
             - url
             type: object
           status:
@@ -142,6 +186,9 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              notAfter:
+                format: date-time
+                type: string
             type: object
         type: object
     served: true

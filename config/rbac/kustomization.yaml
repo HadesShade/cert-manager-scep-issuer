@@ -22,14 +22,14 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the sample-external-issuer itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- sampleclusterissuer_admin_role.yaml
-- sampleclusterissuer_editor_role.yaml
-- sampleclusterissuer_viewer_role.yaml
-- sampleissuer_admin_role.yaml
-- sampleissuer_editor_role.yaml
-- sampleissuer_viewer_role.yaml
+- clusterissuer_admin_role.yaml
+- clusterissuer_editor_role.yaml
+- clusterissuer_viewer_role.yaml
+- issuer_admin_role.yaml
+- issuer_editor_role.yaml
+- issuer_viewer_role.yaml
 # Comment the following 2 lines if you don't wish for the internal cert-manager
-# approver to approve all sample-issuer.example.com CertificateRequests by
+# approver to approve all scep.hshade.io CertificateRequests by
 # default.
 - cert_manager_controller_approver_clusterrole.yaml
 - cert_manager_controller_approver_clusterrolebinding.yaml

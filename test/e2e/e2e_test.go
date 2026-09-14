@@ -27,7 +27,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/cert-manager/sample-external-issuer/test/utils"
+	"github.com/hadesshade/cert-manager-scep-issuer/test/utils"
 )
 
 // namespace where the project is deployed in
@@ -263,39 +263,39 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		It("should reconcile sampleissuer and sampleclusterissuer", func() {
+		It("should reconcile issuer and clusterissuer", func() {
 			By("applying sample resources")
 			cmd := exec.Command("kubectl", "apply", "--kustomize", "config/samples")
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply samples")
 
-			By("waiting for SampleIssuer sample resources to become Ready")
+			By("waiting for Issuer sample resources to become Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"sampleissuers.sample-issuer.example.com", "sampleissuer-sample")
+				"issuers.scep.hshade.io", "issuer-sample")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "SampleIssuer did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "Issuer did not get Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"certificaterequests.cert-manager.io", "sampleissuer-sample")
+				"certificaterequests.cert-manager.io", "issuer-sample")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "SampleIssuer CertificateRequest did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "Issuer CertificateRequest did not get Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"certificates.cert-manager.io", "certificate-by-sampleissuer")
+				"certificates.cert-manager.io", "certificate-by-issuer")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Certificate by SampleIssuer did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "Certificate by Issuer did not get Ready")
 
-			By("waiting for SampleClusterIssuer sample resources to become Ready")
+			By("waiting for ClusterIssuer sample resources to become Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"sampleclusterissuers.sample-issuer.example.com", "sampleclusterissuer-sample")
+				"clusterissuers.scep.hshade.io", "clusterissuer-sample")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "SampleClusterIssuer did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "ClusterIssuer did not get Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"certificaterequests.cert-manager.io", "sampleclusterissuer-sample")
+				"certificaterequests.cert-manager.io", "clusterissuer-sample")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "SampleClusterIssuer CertificateRequest did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "ClusterIssuer CertificateRequest did not get Ready")
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "--timeout=5s",
-				"certificates.cert-manager.io", "certificate-by-sampleclusterissuer")
+				"certificates.cert-manager.io", "certificate-by-clusterissuer")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Certificate by SampleClusterIssuer did not get Ready")
+			Expect(err).NotTo(HaveOccurred(), "Certificate by ClusterIssuer did not get Ready")
 
 			By("deleting sample resources")
 			cmd = exec.Command("kubectl", "delete", "--kustomize", "config/samples")

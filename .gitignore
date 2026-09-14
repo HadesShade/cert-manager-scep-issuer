@@ -26,3 +26,6 @@ go.work
 *.swp
 *.swo
 *~
+
+# Helm packages
+*.tgz

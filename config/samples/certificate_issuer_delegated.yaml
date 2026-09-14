@@ -1,0 +1,17 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: delegated-leaf-cert
+  namespace: default
+spec:
+  secretName: delegated-leaf-tls
+  duration: 2160h 
+  renewBefore: 360h
+  commonName: "test-app.hshade.io"
+  dnsNames:
+    - "test-app.hshade.io"
+    - "alt.hshade.io"
+  issuerRef:
+    group: scep.hshade.io
+    kind: Issuer
+    name: delegated-global-scep-issuer

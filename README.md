@@ -1,324 +1,154 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cert-manager/cert-manager/d53c0b9270f8cd90d908460d69502694e1838f5f/logo/logo-small.png" height="256" width="256" alt="cert-manager project logo" />
-</p>
+# cert-manager SCEP External Issuer
 
-# sample-external-issuer
+![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![Kubernetes](https://img.shields.io/badge/kubernetes-compatible-success.svg)
+![cert-manager](https://img.shields.io/badge/cert--manager-v1.x-orange.svg)
 
-External issuers extend [cert-manager](https://cert-manager.io/) to issue certificates using APIs and services
-which aren't built into the cert-manager core.
+A Kubernetes [cert-manager](https://cert-manager.io/) external issuer controller that enables certificate enrollment via the Simple Certificate Enrollment Protocol (SCEP). 
 
-This repository provides an example of an [External Issuer][] built using the [issuer-lib][] library.
+This project bridges the gap between modern cloud-native Kubernetes workloads and enterprise Public Key Infrastructure (PKI) systems, supporting both **Delegated (RA Agent)** and **Direct** enrollment modes.
 
-## Install
+---
 
-```console
-kubectl apply -f https://github.com/cert-manager/sample-external-issuer/releases/download/v0.1.0/install.yaml
-```
+## 🏗️ Architecture & Enrollment Modes
 
-## Demo
+Because `cert-manager` inherently generates and signs the inner PKCS#10 CSR before handing it to external controllers, this issuer implements two distinct architectures to handle SCEP's `challengePassword` requirements.
 
-You can run the sample-external-issuer on a local cluster with this command:
+### 1. Delegated Mode (Recommended / Enterprise Standard)
+**Best for:** Strict RFC-compliant CAs like **OpenXPKI** and **MicroMDM**.
 
-```console
-make kind-cluster deploy-cert-manager docker-build kind-load deploy e2e
-```
+In Delegated Mode, the controller uses a bootstrap secret challenge to enroll a **Registration Authority (RA) Agent** certificate from the SCEP server. Once the RA certificate is acquired, the controller uses it to authenticate all subsequent leaf certificate requests. 
+* **Advantage:** Completely bypasses the need for individual leaf challenge passwords, overcoming the cryptographic limitation of injecting attributes into pre-signed cert-manager CSRs.
 
-## How to write your own external issuer
+### 2. Direct Mode
+**Best for:** CAs configured for auto-approval (no challenge passwords required).
 
-If you are writing an external issuer you may find it helpful to review the sample code in this repository
-and to follow the steps below, replacing references to `sample-external-issuer` with the name of your project.
+In Direct Mode, the controller submits the cert-manager generated leaf CSR directly to the SCEP endpoint. 
+* **Limitation:** Direct Mode does **not** support challenge passwords (`challengeSecretRef`). Strict SCEP servers require the `challengePassword` embedded inside the mathematically signed inner CSR. Because cert-manager isolates private keys, external controllers cannot modify the inner CSR attributes without invalidating its signature. Direct Mode is strictly reserved for auto-approving endpoints.
+
+---
+
+## 🚀 Installation
+
+The controller is packaged as an OCI Helm chart and hosted on GitHub Container Registry (GHCR).
 
 ### Prerequisites
+* Kubernetes cluster
+* Helm 3.8.0+ (for OCI registry support)
+* [cert-manager](https://cert-manager.io/docs/installation/) installed and running
 
-You will need the following command line tools installed on your PATH:
+### Install via Helm
 
-* [Git](https://git-scm.com/)
-* [Golang v1.20+](https://golang.org/)
-* [Docker v17.03+](https://docs.docker.com/install/)
-* [Kind v0.18.0+](https://kind.sigs.k8s.io/docs/user/quick-start/)
-* [Kubectl v1.26.3+](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
-* [Kubebuilder v3.9.1+](https://book.kubebuilder.io/quick-start.html#installation)
-* [Kustomize v3.8.1+](https://kustomize.io/)
+Install the chart directly from the GHCR OCI registry:
 
-You may also want to read: the [Kubebuilder Book][] and the [cert-manager Concepts Documentation][] for further background
-information.
-
-### Create a test cluster
-
-We will need a Kubernetes cluster on which to test our issuer and we can quickly create one using `kind`.
-
-```console
-kind create cluster
+```bash
+helm install scep-issuer oci://ghcr.io/hadesshade/charts/scep-issuer \
+  --version 0.1.0 \
+  --namespace cert-manager
 ```
 
-This will update your KUBECONFIG file with the URL and credentials for the test cluster.
-You can explore it using `kubectl`
+*Note: The CRDs (`issuers.scep.hshade.io`, `clusterissuers.scep.hshade.io`) are bundled within the Helm chart and will be installed automatically.*
 
-```console
-kubectl get nodes
+---
+
+## 📖 Usage Examples
+
+### Example 1: Delegated Mode (With RA Bootstrap)
+
+First, create a secret containing the bootstrap challenge password for your RA Agent:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scep-ra-challenge
+  namespace: default
+type: Opaque
+stringData:
+  password: "YourSuperSecretChallenge"
 ```
 
-This should show you details of a single node.
+Next, create the `Issuer`:
 
-### Copy the sample-external-issuer code
-
-We need a Git repository to track changes to the issuer code.
-You can start by creating a repository on GitHub or you can create it locally.
-
-```console
-mkdir my-external-issuer
-cd my-external-issuer
-git clone https://github.com/cert-manager/sample-external-issuer.git .
-git remote rm origin
-git remote add origin https://github.com/<username>/my-external-issuer.git
+```yaml
+apiVersion: scep.hshade.io/v1alpha1
+kind: Issuer
+metadata:
+  name: delegated-scep-issuer
+  namespace: default
+spec:
+  url: http://your-scep-server.local/scep
+  enrollmentMode: Delegated
+  insecureSkipVerify: true
+  challengeSecretRef:
+    name: scep-ra-challenge
+    key: password
 ```
 
-### Run the controller-manager
+Finally, request a certificate. The controller will automatically handle the RA bootstrap and sign the leaf:
 
-With all these tools in place and with the project initialised you should now be able to run the issuer for the first time.
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-app-cert
+  namespace: default
+spec:
+  secretName: my-app-cert-tls
+  issuerRef:
+    group: scep.hshade.io
+    kind: Issuer
+    name: delegated-scep-issuer
+  dnsNames:
+    - my-app.local
+```
 
-```console
+### Example 2: Direct Mode (Auto-Approving Endpoints)
+
+Direct Mode submits requests directly to the SCEP server without challenge authentication.
+
+```yaml
+apiVersion: scep.hshade.io/v1alpha1
+kind: Issuer
+metadata:
+  name: direct-scep-issuer
+  namespace: default
+spec:
+  url: http://your-scep-server.local/scep
+  enrollmentMode: Direct
+  insecureSkipVerify: true
+  # Note: challengeSecretRef is NOT supported in Direct mode.
+```
+
+---
+
+## 🛠️ Development & Contributing
+
+This project is built using [Kubebuilder](https://book.kubebuilder.io/). 
+
+### Building locally
+```bash
+# Generate manifests and deepcopy code
+make manifests generate
+
+# Run tests
+make test
+
+# Run the controller locally against your current kubeconfig context
 make run
 ```
 
-This will compile and run the issuer locally and it will connect to the test cluster and log some startup messages.
-We will add more to it in the next steps.
-
-### Creating MyIssuer and MyClusterIssuer custom resources
-
-An [External Issuer][] must implement two custom resources for compatibility with cert-manager: `MyIssuer` and `MyClusterIssuer`
-
-NOTE: It is important to understand the [Concept of Issuers] before proceeding.
-
-The `MyIssuer` and `MyClusterIssuer` custom resources can be defined in the `api/v1alpha1` directory.
-Use the `SampleIssuer` and `SampleClusterIssuer` definitions as a starting point.
-
-Additionally, the group, version and kind of the custom resources must be customised to be unique to your issuer:
-
-* `group` is the name given to a collection of custom resource APIs
-* `kind` is the name of an individual resource in that group
-* `version` allows you to create multiple versions of your APIs as they evolve, whilst providing backwards compatibility for clients using older API versions
-
-After modifying the API source files you should always regenerate all generated code and configuration,
-as follows:
-
-```console
-make generate manifests
-```
-
-You should see a number of new and modified files, reflecting the changes you made to the API source files.
-
-#### Issuer health checks
-
-An issuer that connects to a certificate authority API may want to perform periodic health checks and sanity checks,
-to ensure that the API server is responding and if not,
-to set update the `Ready` condition of the `Issuer` to false, and log a meaningful error message with the condition.
-This will give early warning of problems with the configuration or with the API,
-rather than waiting a for `CertificateRequest` to fail before being alerted to the problem.
-Additionally, this implements the "Circuit Breaker" pattern, it makes all the `CertificateRequest` wait until the `Issuer`
-is healthy again.
-
-The health check is implemented in the `Check` function in the `./internal/controllers/signer.go` file.
-
-TODO: issuer-lib does not yet support performing the health checks periodically.
-There should be some return value for the `Check` function so we can make controller-runtime retry reconciling regularly, even when the current reconcile succeeds.
-
-See [the issuer-lib README](https://github.com/cert-manager/issuer-lib?tab=readme-ov-file#how-it-works) for more information.
-
-### Sign the cert-manager CertificateRequest resources and kubernetes CertificateSigningRequest resources
-
-The `Sign` function in the `./internal/controllers/signer.go` file is used by the CertificateRequest and CertificateSigningRequest reconcilers
-to create signed x509 certificates for the provided x509 certificate signing requests.
-
-If `Sign` succeeds it returns the bytes of a signed certificate which we then use as the value for `CertificateRequest.Status.Certificate`.
-If it returns a normal error, the Sign function will be retried as long as we have not spent more than the configured MaxRetryDuration after the certificate request was created.
-
-See [the issuer-lib README](https://github.com/cert-manager/issuer-lib?tab=readme-ov-file#how-it-works) for more information.
-
-#### Get the Issuer or ClusterIssuer credentials from a Secret
-
-The API for your CA may require some configuration and credentials and the obvious place to store these is in a Kubernetes `Secret`.
-We extend the `IssuerSpec` to include a `URL` field and a `AuthSecretName`, which is the name of a `Secret`.
-As usual run `make generate manifests` after modifying the API source files:
-
-```console
-make generate manifests
-```
-
-NOTE: The namespace of that Secret is deliberately not specified here,
-because that would breach a security boundary and potentially allow someone who has permission to create `Issuer` resources,
-to make the controller access secrets in another namespace which that person would not normally have access to.
-
-For this reason, the Secret for an Issuer MUST be in the same namespace as the Issuer.
-The Secret for a ClusterIssuer MUST be in a namespace defined by cluster administrator,
-but that is a little more complicated and for now we will concentrate on Issuer Secrets.
-
-Both the `IssuerReconciler` and the `CertificateRequestReconciler` are updated to `GET` the `Secret` referred to by the `Issuer`.
-
-Add a new [Kubebuilder RBAC Marker](https://book.kubebuilder.io/reference/markers/rbac.html) to both controllers,
-permitting them read-only access to `Secret` resources.
-
-```go
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-```
-
-Then run `make manifests` to regenerate the RBAC configuration in `config/`.
-
-Add the `corev1` types to the `Scheme` in the unit-tests.
-
-NOTE: It has already been added to the `main.go` `Scheme` as part of the `clientgoscheme`.
-
-Write a test to check that if the `GET` `Secret` operation fails,
-the error is returned and triggers a retry-with-backoff.
-This important because the `Secret` may not exist at the time the `Issuer` or `CertificateRequest` is created.
-
-NOTE: Ideally, we would `WATCH` for the particular `Secret` and trigger the reconciliation when it becomes available.
-And that may be a future enhancement to this project.
-
-In the case of the `CertificateRequestReconciler` we need to deal with both `Issuer` and `ClusterIssuer` types,
-so we modify the `issuerutil` function to allow us to extract an `IssuerSpec` from either of those types.
-
-### Logging and Events
-
-We want to make it easy to debug problems with the issuer,
-so in addition to setting Conditions on the Issuer, ClusterIssuer and CertificateRequest,
-we can provide more feedback to the user by logging Kubernetes Events.
-You may want to read more about [Application Introspection and Debugging][] before continuing.
-
-[Application Introspection and Debugging]: https://kubernetes.io/docs/tasks/debug-application-cluster/debug-application-introspection/
-
-Kubernetes Events are saved to the API server on a best-effort basis,
-they are (usually) associated with some other Kubernetes resource,
-and they are temporary; old Events are periodically purged from the API server.
-This allows tools such as `kubectl describe <resource-kind> <resource-name>` to show not only the resource details,
-but also a table of the recent events associated with that resource.
-
-The aim is to produce helpful debug output that looks like this:
-
-```
-$ kubectl describe clusterissuers.sample-issuer.example.com clusterissuer-sample
-...
-    Type:                  Ready
-Events:
-  Type     Reason            Age                From                    Message
-  ----     ------            ----               ----                    -------
-  Normal   IssuerReconciler  13s                sample-external-issuer  First seen
-  Warning  IssuerReconciler  13s (x3 over 13s)  sample-external-issuer  Temporary error. Retrying: failed to get Secret containing Issuer credentials, secret name: sample-external-issuer-system/clusterissuer-sample-credentials, reason: Secret "clusterissuer-sample-credentials" not found
-  Normal   IssuerReconciler  13s (x3 over 13s)  sample-external-issuer  Success
-```
-And this:
-
-```
-$ kubectl describe certificaterequests.cert-manager.io issuer-sample
-...
-Events:
-  Type     Reason                        Age   From                    Message
-  ----     ------                        ----  ----                    -------
-  Normal   CertificateRequestReconciler  23m   sample-external-issuer  Initialising Ready condition
-  Warning  CertificateRequestReconciler  23m   sample-external-issuer  Temporary error. Retrying: error getting issuer: Issuer.sample-issuer.example.com "issuer-sample" not found
-  Normal   CertificateRequestReconciler  23m   sample-external-issuer  Signed
-
-```
-
-First add [record.EventRecorder][] attributes to the `IssuerReconciler` and to the `CertificateRequestReconciler`.
-And then in the Reconciler code, you can then generate an event by executing `r.recorder.Eventf(...)` whenever a significant change is made to the resource.
-
-[record.EventRecorder]: https://pkg.go.dev/k8s.io/client-go/tools/record#EventRecorder
-
-You can also write unit tests to verify the Reconciler events by using a [record.FakeRecorder][].
-
-[record.FakeRecorder]: https://pkg.go.dev/k8s.io/client-go/tools/record#FakeRecorder
-
-See [PR 10: Generate Kubernetes Events](https://github.com/cert-manager/sample-external-issuer/pull/10) for an example of how you might generate events in your issuer.
-
-### End-to-end tests
-
-Now our issuer is almost feature complete and it should be possible to write an end-to-end test that
-deploys a cert-manager `Certificate`
-referring to an external `Issuer` and check that a signed `Certificate` is saved to the expected secret.
-
-We can make such a test easier by tidying up the `Makefile` and adding some new targets
-which will help create a test cluster and to help install cert-manager.
-
-We can write a simple end-to-end test which deploys a `Certificate` manifest and waits for it to be ready.
-
-```console
-kubectl apply --filename config/samples
-kubectl wait --for=condition=Ready --timeout=5s sampleissuers.sample-issuer.example.com sampleissuer-sample
-kubectl wait --for=condition=Ready --timeout=5s  certificates.cert-manager.io certificate-by-sampleissuer
-```
-
-You can of course write more complete tests than this,
-but this is a good start and demonstrates that the issuer is doing what we hoped it would do.
-
-Run the tests as follows:
-
+### Building and Pushing Images
 ```bash
-# Create a Kind cluster along with cert-manager.
-make kind-cluster deploy-cert-manager
-
-# Wait for cert-manager to start...
-
-# Build and install sample-external-issuer and run the E2E tests.
-# This step can be run iteratively when ever you make changes to the code or to the installation manifests.
-make docker-build kind-load deploy e2e
+make docker-build docker-push IMG=ghcr.io/hadesshade/cert-manager-scep-issuer:latest
 ```
 
-#### Continuous Integration
+## 📜 License
 
-You should configure a CI system to automatically run the unit-tests when the code changes.
-See the `.github/workflows/`  directory for some examples of using GitHub Actions
-which are triggered by changes to pull request branches and by any changes to the master branch.
+Copyright © 2026 hadesshade.
 
-The E2E tests can be executed with GitHub Actions too.
-The GitHub Actions Ubuntu runner has Docker installed and is capable of running a Kind cluster for the E2E tests.
-The Kind cluster logs can be saved in the event of an E2E test failure,
-and uploaded as a GitHub Actions artifact,
-to make it easier to diagnose E2E test failures.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-## Security considerations
-
-We use a [Distroless Docker Image][] as our Docker base image,
-and we configure our `manager` process to run as `USER: nonroot:nonroot`.
-This limits the privileges of the `manager` process in the cluster.
-
-Additionally we [Configure a Security Context][] for the manager Pod.
-We set `runAsNonRoot`, which ensure that the Kubelet will validate the image at runtime
-to ensure that it does not run as UID 0 (root) and fail to start the container if it does.
-
-## Notes for cert-manager Maintainers
-
-### Release Process
-
-Visit the [GitHub New Release Page][] and fill in the form.
-Here are some example values:
-
- * Tag Version: `v0.1.0-alpha.0`, `v0.1.0` for example.
- * Target: `main`
- * Release Title: `Release v0.1.0-alpha.2`
- * Description: (optional) a short summary of the changes since the last release.
-
-Click the `Publish release` button to trigger the automated release process:
-
-* A Docker image will be generated and published to `ghcr.io/cert-manager/sample-external-issuer/controller` with the chosen tag.
-* An `install.yaml` file will be generated and attached to the release.
-
-## Links
-
-* [External Issuer]
-* [issuer-lib]
-* [cert-manager Concepts Documentation]
-* [Kubebuilder Book]
-* [Kubebuilder Markers]
-* [Distroless Docker Image]
-* [Configure a Security Context]
-* [GitHub New Release Page]
-
-[External Issuer]: https://cert-manager.io/docs/contributing/external-issuers
-[issuer-lib]: https://github.com/cert-manager/issuer-lib
-[cert-manager Concepts Documentation]: https://cert-manager.io/docs/concepts
-[Kubebuilder Book]: https://book.kubebuilder.io
-[Kubebuilder Markers]: https://book.kubebuilder.io/reference/markers.html
-[Distroless Docker Image]: https://github.com/GoogleContainerTools/distroless
-[Configure a Security Context]: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
-[GitHub New Release Page]: https://github.com/cert-manager/sample-external-issuer/releases/new
+    http://www.apache.org/licenses/LICENSE-2.0
