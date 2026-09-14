@@ -145,7 +145,7 @@ make docker-build docker-push IMG=ghcr.io/hadesshade/cert-manager-scep-issuer:la
 
 ## 📜 License
 
-Copyright © 2026 hadesshade.
+Copyright © 2026 Kevin Tim.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
