@@ -1,0 +1,12 @@
+## Append samples of your project ##
+resources:
+- scep_v1alpha1_issuer.yaml
+- scep_v1alpha1_clusterissuer.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
+
+- certificate_clusterissuer.yaml
+- certificate_issuer.yaml
+- certificaterequest_clusterissuer.yaml
+- certificaterequest_issuer.yaml
+- secret_clusterissuer.yaml
+- secret_issuer.yaml

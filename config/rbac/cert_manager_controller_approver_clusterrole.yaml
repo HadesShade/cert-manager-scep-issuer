@@ -1,0 +1,15 @@
+# permissions to approve all scep.hshade.io requests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller-approve:scep-hshade-io
+rules:
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - signers
+  verbs:
+  - approve
+  resourceNames:
+  - issuers.scep.hshade.io/*
+  - clusterissuers.scep.hshade.io/*

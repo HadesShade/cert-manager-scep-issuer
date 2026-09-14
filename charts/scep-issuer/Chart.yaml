@@ -1,0 +1,16 @@
+apiVersion: v2
+name: scep-issuer
+description: A cert-manager external issuer controller supporting SCEP (Delegated and Direct modes)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - cert-manager
+  - scep
+  - pki
+  - issuer
+home: https://github.com/hadesshade/cert-manager-scep-issuer
+sources:
+  - https://github.com/hadesshade/cert-manager-scep-issuer
+maintainers:
+  - name: hadesshade

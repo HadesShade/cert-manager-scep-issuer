@@ -1,0 +1,8 @@
+apiVersion: scep.hshade.io/v1alpha1
+kind: ClusterIssuer
+metadata:
+  name: direct-scep-cluster-issuer
+spec:
+  url: http://192.168.1.33:8080/scep
+  enrollmentMode: Direct
+  insecureSkipVerify: true

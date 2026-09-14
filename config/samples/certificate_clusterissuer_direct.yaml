@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: direct-global-leaf-cert
+  namespace: default
+spec:
+  secretName: direct-global-leaf-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: "direct-global.hshade.io"
+  issuerRef:
+    group: scep.hshade.io
+    kind: ClusterIssuer
+    name: direct-scep-cluster-issuer
