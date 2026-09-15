@@ -7,6 +7,7 @@ type: Opaque
 stringData:
   password: "SecretChallenge"
 ---
+# Note: The RA Agent certificate used for delegation must be signed and issued by the SCEP Certificate Authority
 apiVersion: v1
 kind: Secret
 metadata:
