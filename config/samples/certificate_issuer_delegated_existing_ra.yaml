@@ -1,0 +1,17 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: delegated-leaf-cert-exra
+  namespace: default
+spec:
+  secretName: delegated-leaf-exra-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: "test-exra.hshade.io"
+  dnsNames:
+    - "test-exra.hshade.io"
+    - "alt-exra.hshade.io"
+  issuerRef:
+    group: scep.hshade.io
+    kind: Issuer
+    name: delegated-scep-issuer-exra

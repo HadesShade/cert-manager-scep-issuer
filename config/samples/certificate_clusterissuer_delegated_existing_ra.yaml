@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: delegated-global-leaf-exra-cert
+  namespace: default
+spec:
+  secretName: delegated-global-leaf-exra-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: "global-exra.hshade.io"
+  issuerRef:
+    group: scep.hshade.io
+    kind: ClusterIssuer
+    name: delegated-global-scep-issuer-exra
