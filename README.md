@@ -83,7 +83,7 @@ spec:
   challengeSecretRef:
     name: scep-ra-challenge
     key: password
-  # Here, you can define either delegatedSignerSecretName for existing RA TLS secret or define a new one using delegatedSignerConfiguration
+  # Here, you can define either delegatedSignerSecretName for existing RA TLS secret, # or define a new one using delegatedSignerConfiguration
   delegatedSignerConfiguration:
     commonName: "your.ra.cn"
     dnsNames:
