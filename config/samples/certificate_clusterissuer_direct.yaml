@@ -7,7 +7,7 @@ spec:
   secretName: direct-global-leaf-tls
   duration: 2160h
   renewBefore: 360h
-  commonName: "direct-global.hshade.io"
+  commonName: "direct-global-test.hshade.io"
   issuerRef:
     group: scep.hshade.io
     kind: ClusterIssuer

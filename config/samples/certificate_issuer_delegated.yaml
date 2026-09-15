@@ -5,13 +5,13 @@ metadata:
   namespace: default
 spec:
   secretName: delegated-leaf-tls
-  duration: 2160h 
+  duration: 2160h
   renewBefore: 360h
-  commonName: "test-app.hshade.io"
+  commonName: "test-app1.hshade.io"
   dnsNames:
-    - "test-app.hshade.io"
-    - "alt.hshade.io"
+    - "test-app1.hshade.io"
+    - "alt1.hshade.io"
   issuerRef:
     group: scep.hshade.io
     kind: Issuer
-    name: delegated-global-scep-issuer
+    name: delegated-scep-issuer

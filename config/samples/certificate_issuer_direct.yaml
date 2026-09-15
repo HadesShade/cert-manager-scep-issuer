@@ -7,7 +7,7 @@ spec:
   secretName: direct-leaf-tls
   duration: 2160h
   renewBefore: 360h
-  commonName: "direct.hshade.io"
+  commonName: "direct-test.hshade.io"
   issuerRef:
     group: scep.hshade.io
     kind: Issuer
