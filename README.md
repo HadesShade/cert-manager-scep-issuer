@@ -83,6 +83,18 @@ spec:
   challengeSecretRef:
     name: scep-ra-challenge
     key: password
+  # Here, you can define either delegatedSignerSecretName for existing RA TLS secret or define a new one using delegatedSignerConfiguration
+  delegatedSignerConfiguration:
+    commonName: "your.ra.cn"
+    dnsNames:
+      - "your.ra.alt.name"
+    subject:
+      organizations:
+        - "Your Organization"
+      countries:
+        - "ID"
+      organizationalUnits:
+        - "Your OU"
 ```
 
 Finally, request a certificate. The controller will automatically handle the RA bootstrap and sign the leaf:
