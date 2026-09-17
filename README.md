@@ -15,13 +15,13 @@ This project bridges the gap between modern cloud-native Kubernetes workloads an
 Because `cert-manager` inherently generates and signs the inner PKCS#10 CSR before handing it to external controllers, this issuer implements two distinct architectures to handle SCEP's `challengePassword` requirements.
 
 ### 1. Delegated Mode (Recommended / Enterprise Standard)
-**Best for:** Strict RFC-compliant CAs like **OpenXPKI** and **MicroMDM**.
+**Best for:** Strict RFC-compliant CAs like **OpenXPKI** and **EJBCA**.
 
 In Delegated Mode, the controller uses a bootstrap secret challenge to enroll a **Registration Authority (RA) Agent** certificate from the SCEP server. Once the RA certificate is acquired, the controller uses it to authenticate all subsequent leaf certificate requests. 
 * **Advantage:** Completely bypasses the need for individual leaf challenge passwords, overcoming the cryptographic limitation of injecting attributes into pre-signed cert-manager CSRs.
 
 ### 2. Direct Mode
-**Best for:** CAs configured for auto-approval (no challenge passwords required).
+**Best for:** CAs configured for auto-approval (no challenge passwords required) like MicroMDM.
 
 In Direct Mode, the controller submits the cert-manager generated leaf CSR directly to the SCEP endpoint. 
 * **Limitation:** Direct Mode does **not** support challenge passwords (`challengeSecretRef`). Strict SCEP servers require the `challengePassword` embedded inside the mathematically signed inner CSR. Because cert-manager isolates private keys, external controllers cannot modify the inner CSR attributes without invalidating its signature. Direct Mode is strictly reserved for auto-approving endpoints.
