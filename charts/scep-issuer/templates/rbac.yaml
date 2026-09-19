@@ -5,28 +5,36 @@ metadata:
 rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificaterequests"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["cert-manager.io"]
     resources: ["certificaterequests/status"]
-    verbs: ["update", "patch"]
+    verbs: ["patch"]
   - apiGroups: ["scep.hshade.io"]
     resources: ["issuers", "clusterissuers"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["scep.hshade.io"]
     resources: ["issuers/status", "clusterissuers/status"]
-    verbs: ["update", "patch"]
+    verbs: ["patch"]
+  # Secrets are read through the manager's cached client (needs get/list/watch).
+  # create/update manage the RA signer secret, delete removes the pending-enrollment secret.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["", "events.k8s.io"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
   - apiGroups: ["certificates.k8s.io"]
     resources: ["certificatesigningrequests"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["certificates.k8s.io"]
-    resources: ["certificatesigningrequests/status", "certificatesigningrequests/approval"]
-    verbs: ["update", "patch"]
+    resources: ["certificatesigningrequests/status"]
+    verbs: ["patch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["signers"]
+    resourceNames:
+      - clusterissuers.scep.hshade.io/*
+      - issuers.scep.hshade.io/*
+    verbs: ["sign"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

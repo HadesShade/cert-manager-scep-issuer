@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
@@ -29,6 +31,7 @@ import (
 	"github.com/go-kit/kit/log"
 	api "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
 	scepclient "github.com/micromdm/scep/v2/client"
+	"github.com/micromdm/scep/v2/cryptoutil/x509util"
 	"github.com/smallstep/pkcs7"
 	"github.com/smallstep/scep"
 	corev1 "k8s.io/api/core/v1"
@@ -37,10 +40,23 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 const (
 	pendingSecretSuffix = "-pending"
+
+	// Secrets created by this controller carry this label. The controller only
+	// renews (overwrites) a signer Secret that has it, so it never clobbers a
+	// Secret it did not create.
+	managedByLabelKey   = "app.kubernetes.io/managed-by"
+	managedByLabelValue = "scep-issuer"
+
+	// raRenewalInterval is how often the background loop re-checks the RA signer
+	// certificate of every Delegated issuer. raRenewalAttemptTimeout bounds a
+	// single attempt so a hung SCEP server cannot stall the loop.
+	raRenewalInterval       = 10 * time.Minute
+	raRenewalAttemptTimeout = 2 * time.Minute
 )
 
 var (
@@ -52,6 +68,7 @@ var (
 	errSignerBuilder        = errors.New("failed to build the signer")
 	errSignerSign           = errors.New("failed to sign")
 	errStillPending         = errors.New("AWAITING APPROVAL: RA bootstrap enrollment is pending manual approval")
+	errSecretNotManaged     = errors.New("signer secret exists but was not created by this controller")
 
 	OidSCEPmessageType   = asn1.ObjectIdentifier{2, 16, 840, 1, 113733, 1, 9, 2}
 	OidSCEPsenderNonce   = asn1.ObjectIdentifier{2, 16, 840, 1, 113733, 1, 9, 5}
@@ -76,12 +93,17 @@ type Issuer struct {
 	ClusterResourceNamespace string
 
 	client client.Client
+
+	// signerLocks serializes RA bootstrap/renewal per signer Secret: both Check()
+	// and the background renewal loop can run it. Values are 1-slot channels so
+	// waiting for the lock can honour context cancellation.
+	signerLocks sync.Map
 }
 
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers/status;issuers/status,verbs=patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests/status,verbs=patch
 // +kubebuilder:rbac:groups=certificates.k8s.io,resources=certificatesigningrequests,verbs=get;list;watch
@@ -90,6 +112,13 @@ type Issuer struct {
 
 func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	s.client = mgr.GetClient()
+
+	// issuer-lib only calls Check() when an issuer's spec changes or after an
+	// error, never periodically, so a Ready issuer would never renew its RA
+	// certificate on its own. This loop does it (leader only).
+	if err := mgr.Add(manager.RunnableFunc(s.renewDelegatedSigners)); err != nil {
+		return err
+	}
 
 	return (&controllers.CombinedController{
 		IssuerTypes:        []issuerapi.Issuer{&api.Issuer{}},
@@ -268,32 +297,53 @@ func (o *Issuer) ResolveSignerSecretData(ctx context.Context, issuerSpec *api.Is
 
 func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *api.IssuerSpec, cfg *api.DelegatedSignerConfiguration, namespace, secretName string) error {
 	nn := types.NamespacedName{Namespace: namespace, Name: secretName}
-	needsUpdate := false
 
-	var secret corev1.Secret
-	err := o.client.Get(ctx, nn, &secret)
-	if err == nil {
-		cert, _, parseErr := ParseTLSPair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
-		if parseErr == nil {
+	unlock, lockErr := o.lockSigner(ctx, nn)
+	if lockErr != nil {
+		return fmt.Errorf("failed to lock signer secret %s: %w", nn, lockErr)
+	}
+	defer unlock()
+
+	var existing corev1.Secret
+	exists := true
+	if err := o.client.Get(ctx, nn, &existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to check for existing signer secret: %w", err)
+		}
+		exists = false
+	}
+
+	// hasValidCert: the Secret holds an RA certificate that has not expired yet.
+	// While it does, a failed or pending renewal is only logged (see
+	// tolerateRenewalError) so the issuer keeps signing with the current one.
+	hasValidCert := false
+	if exists {
+		if cert, _, parseErr := ParseTLSPair(existing.Data[corev1.TLSCertKey], existing.Data[corev1.TLSPrivateKeyKey]); parseErr == nil {
 			renewalThreshold := 720 * time.Hour // Default 30 days
 			if cfg.RenewalWindow != nil {
 				renewalThreshold = cfg.RenewalWindow.Duration
 			}
 
-			if time.Until(cert.NotAfter) > renewalThreshold {
+			remaining := time.Until(cert.NotAfter)
+			if remaining > renewalThreshold {
 				return nil
 			}
+			hasValidCert = remaining > 0
 		}
-		needsUpdate = true
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to check for existing signer secret: %w", err)
+
+		// Never overwrite a Secret this controller did not create.
+		if !isManagedSecret(&existing) {
+			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf(
+				"%w: %s (add the label %s=%s to allow renewal, or delete the Secret)",
+				errSecretNotManaged, nn, managedByLabelKey, managedByLabelValue))
+		}
 	}
 
 	var challengePassword string
 	if issuerSpec.ChallengeSecretRef != nil {
 		passwordPtr, err := o.GetChallengePassword(ctx, issuerSpec, namespace)
 		if err != nil {
-			return fmt.Errorf("failed to read bootstrap challenge password: %w", err)
+			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf("failed to read bootstrap challenge password: %w", err))
 		}
 		challengePassword = *passwordPtr
 	}
@@ -301,36 +351,187 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 	// Updated call passing the entire cfg object
 	cert, key, err := o.BootstrapDelegatingSignerIdentity(ctx, issuerSpec, namespace, secretName, cfg, challengePassword)
 	if err != nil {
-		return err
+		return tolerateRenewalError(ctx, nn, hasValidCert, err)
+	}
+
+	certPEM, keyPEM := EncodeCertPEM(cert), EncodeKeyPKCS8(key)
+
+	// Build tracking annotations dynamically
+	resourceName := secretName
+	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+
+	isClusterIssuer := false
+	if namespace == o.ClusterResourceNamespace || namespace == "" {
+		var checkIssuer api.Issuer
+		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, &checkIssuer)
+		if checkErr != nil && apierrors.IsNotFound(checkErr) {
+			isClusterIssuer = true
+		}
+	}
+
+	annotations := map[string]string{}
+	if isClusterIssuer {
+		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
+	} else {
+		annotations["scep.hshade.io/issuer-name"] = resourceName
+		annotations["scep.hshade.io/issuer-namespace"] = namespace
+	}
+
+	if exists {
+		// Update a copy of the existing Secret so its labels, annotations, owner
+		// references, finalizers and any extra keys are preserved.
+		updated := existing.DeepCopy()
+		if updated.Labels == nil {
+			updated.Labels = map[string]string{}
+		}
+		updated.Labels[managedByLabelKey] = managedByLabelValue
+
+		if updated.Annotations == nil {
+			updated.Annotations = map[string]string{}
+		}
+		for k, v := range annotations {
+			updated.Annotations[k] = v
+		}
+
+		if updated.Data == nil {
+			updated.Data = map[string][]byte{}
+		}
+		updated.Data[corev1.TLSCertKey] = certPEM
+		updated.Data[corev1.TLSPrivateKeyKey] = keyPEM
+
+		if err := o.client.Update(ctx, updated); err != nil {
+			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf("failed to update expiring signer secret: %w", err))
+		}
+		return nil
 	}
 
 	newSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
-		Type:       corev1.SecretTypeTLS,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        secretName,
+			Namespace:   namespace,
+			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
+			Annotations: annotations,
+		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			corev1.TLSCertKey:       EncodeCertPEM(cert),
-			corev1.TLSPrivateKeyKey: EncodeKeyPKCS8(key),
+			corev1.TLSCertKey:       certPEM,
+			corev1.TLSPrivateKeyKey: keyPEM,
 		},
 	}
-
-	if needsUpdate {
-		newSecret.ResourceVersion = secret.ResourceVersion
-		if err := o.client.Update(ctx, newSecret); err != nil {
-			return fmt.Errorf("failed to update expiring signer secret: %w", err)
+	if err := o.client.Create(ctx, newSecret); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
 		}
-	} else {
-		if err := o.client.Create(ctx, newSecret); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return nil
-			}
-			return fmt.Errorf("failed to create signer secret: %w", err)
-		}
+		return fmt.Errorf("failed to create signer secret: %w", err)
 	}
 
 	return nil
 }
 
-// Signature updated to accept *api.DelegatedSignerConfiguration
+func isManagedSecret(secret *corev1.Secret) bool {
+	return secret.Labels[managedByLabelKey] == managedByLabelValue
+}
+
+// tolerateRenewalError turns a failed or pending RA renewal into a log line when a
+// still-valid RA certificate exists, so the issuer stays Ready and keeps signing
+// with it. Without a valid certificate (initial enrollment, or already expired) the
+// error is returned so the issuer reports NotReady as before.
+func tolerateRenewalError(ctx context.Context, nn types.NamespacedName, hasValidCert bool, err error) error {
+	if !hasValidCert {
+		return err
+	}
+
+	log := ctrl.LoggerFrom(ctx).WithValues("secret", nn.String())
+	if errors.Is(err, errStillPending) {
+		log.Info("RA signer renewal is awaiting approval; continuing with the current RA certificate")
+	} else {
+		log.Error(err, "RA signer renewal failed; continuing with the current RA certificate, will retry")
+	}
+	return nil
+}
+
+// lockSigner takes the per-Secret bootstrap/renewal lock, or fails if ctx ends first.
+func (o *Issuer) lockSigner(ctx context.Context, nn types.NamespacedName) (func(), error) {
+	v, _ := o.signerLocks.LoadOrStore(nn.String(), make(chan struct{}, 1))
+	sem := v.(chan struct{})
+
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// renewDelegatedSigners periodically retries RA signer renewal (including polling a
+// pending renewal) for every Delegated issuer that manages its own signer Secret.
+func (o *Issuer) renewDelegatedSigners(ctx context.Context) error {
+	ticker := time.NewTicker(raRenewalInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			o.renewAllDelegatedSigners(ctx)
+		}
+	}
+}
+
+func (o *Issuer) renewAllDelegatedSigners(ctx context.Context) {
+	log := ctrl.LoggerFrom(ctx).WithName("ra-renewal")
+
+	var issuers api.IssuerList
+	if err := o.client.List(ctx, &issuers); err != nil {
+		log.Error(err, "failed to list Issuers")
+	} else {
+		for i := range issuers.Items {
+			o.renewDelegatedSigner(ctx, &issuers.Items[i])
+		}
+	}
+
+	var clusterIssuers api.ClusterIssuerList
+	if err := o.client.List(ctx, &clusterIssuers); err != nil {
+		log.Error(err, "failed to list ClusterIssuers")
+	} else {
+		for i := range clusterIssuers.Items {
+			o.renewDelegatedSigner(ctx, &clusterIssuers.Items[i])
+		}
+	}
+}
+
+func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerapi.Issuer) {
+	spec, namespace, err := o.GetIssuerDetails(issuerObject)
+	if err != nil ||
+		spec.EnrollmentMode != api.Delegated ||
+		spec.DelegatedSignerConfiguration == nil ||
+		spec.DelegatedSignerSecretName != nil {
+		return
+	}
+
+	log := ctrl.LoggerFrom(ctx).WithName("ra-renewal").WithValues("issuer", issuerObject.GetName(), "namespace", namespace)
+	secretName := delegatedSignerSecretName(issuerObject)
+
+	// Renewal only: the initial enrollment is driven by Check(), which has its own
+	// retry/backoff and reports failures in the issuer status.
+	var existing corev1.Secret
+	if err := o.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to look up RA signer secret")
+		}
+		return
+	}
+
+	attemptCtx, cancel := context.WithTimeout(ctx, raRenewalAttemptTimeout)
+	defer cancel()
+
+	if err := o.EnsureDelegatingSignerSecret(attemptCtx, spec, spec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
+		log.Error(err, "RA signer renewal failed")
+	}
+}
+
+// Signature accept *api.DelegatedSignerConfiguration
 func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	scepClient, caCerts, caCert, err := GetSCEPClient(ctx, issuerSpec)
 	if err != nil {
@@ -401,12 +602,21 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 		subject.OrganizationalUnit = cfg.Subject.OrganizationalUnits
 	}
 
-	csrTemplate := &x509.CertificateRequest{
-		Subject:  subject,
-		DNSNames: cfg.DNSNames,
+	// Unlike leaf CSRs (which cert-manager generates and signs itself), the RA
+	// bootstrap CSR is created here, so we hold its private key and can embed the
+	// PKCS#9 challengePassword attribute (RFC 2985, OID 1.2.840.113549.1.9.7)
+	// before signing. The standard library's x509.CreateCertificateRequest cannot
+	// emit this attribute, so x509util (which re-signs the CSR after adding it) is
+	// used instead. An empty challengePassword yields a plain stdlib CSR.
+	csrTemplate := &x509util.CertificateRequest{
+		CertificateRequest: x509.CertificateRequest{
+			Subject:  subject,
+			DNSNames: cfg.DNSNames,
+		},
+		ChallengePassword: challengePassword,
 	}
 
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, raKey)
+	csrDER, err := x509util.CreateCertificateRequest(rand.Reader, csrTemplate, raKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -417,7 +627,7 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 
 	bootstrapTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      csrTemplate.Subject,
+		Subject:      subject,
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -569,9 +779,35 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 }
 
 func (o *Issuer) SavePendingSecret(ctx context.Context, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
+	resourceName := name.Name
+	resourceName = strings.TrimSuffix(resourceName, "-pending")
+	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+
+	isClusterIssuer := false
+	if name.Namespace == o.ClusterResourceNamespace || name.Namespace == "" {
+		var checkIssuer api.Issuer
+		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: name.Namespace}, &checkIssuer)
+		if checkErr != nil && apierrors.IsNotFound(checkErr) {
+			isClusterIssuer = true
+		}
+	}
+
+	annotations := map[string]string{}
+	if isClusterIssuer {
+		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
+	} else {
+		annotations["scep.hshade.io/issuer-name"] = resourceName
+		annotations["scep.hshade.io/issuer-namespace"] = name.Namespace
+	}
+
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
-		Type:       corev1.SecretTypeOpaque,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name.Name,
+			Namespace:   name.Namespace,
+			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
+			Annotations: annotations,
+		},
+		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			"tls.crt":        EncodeCertPEM(bootstrapCert),
 			"tls.key":        EncodeKeyPKCS8(raKey),
