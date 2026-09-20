@@ -108,9 +108,6 @@ type Issuer struct {
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers/status;issuers/status,verbs=patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// Secrets: get/list/watch because they are read through the manager's cached client
-// (challenge, RA signer and pending secrets); create+update manage the RA signer
-// secret, create+delete manage the pending-enrollment secret. patch is never used.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests/status,verbs=patch
@@ -364,6 +361,27 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 
 	certPEM, keyPEM := EncodeCertPEM(cert), EncodeKeyPKCS8(key)
 
+	// Build tracking annotations dynamically
+	resourceName := secretName
+	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+
+	isClusterIssuer := false
+	if namespace == o.ClusterResourceNamespace || namespace == "" {
+		var checkIssuer api.Issuer
+		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, &checkIssuer)
+		if checkErr != nil && apierrors.IsNotFound(checkErr) {
+			isClusterIssuer = true
+		}
+	}
+
+	annotations := map[string]string{}
+	if isClusterIssuer {
+		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
+	} else {
+		annotations["scep.hshade.io/issuer-name"] = resourceName
+		annotations["scep.hshade.io/issuer-namespace"] = namespace
+	}
+
 	if exists {
 		// Update a copy of the existing Secret so its labels, annotations, owner
 		// references, finalizers and any extra keys are preserved.
@@ -372,6 +390,14 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 			updated.Labels = map[string]string{}
 		}
 		updated.Labels[managedByLabelKey] = managedByLabelValue
+
+		if updated.Annotations == nil {
+			updated.Annotations = map[string]string{}
+		}
+		for k, v := range annotations {
+			updated.Annotations[k] = v
+		}
+
 		if updated.Data == nil {
 			updated.Data = map[string][]byte{}
 		}
@@ -386,9 +412,10 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 
 	newSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: namespace,
-			Labels:    map[string]string{managedByLabelKey: managedByLabelValue},
+			Name:        secretName,
+			Namespace:   namespace,
+			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
+			Annotations: annotations,
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -554,7 +581,7 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	}
 }
 
-// Signature updated to accept *api.DelegatedSignerConfiguration
+// Signature accept *api.DelegatedSignerConfiguration
 func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	scepClient, caCerts, caCert, err := GetSCEPClient(ctx, issuerSpec)
 	if err != nil {
@@ -802,11 +829,33 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 }
 
 func (o *Issuer) SavePendingSecret(ctx context.Context, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
+	resourceName := name.Name
+	resourceName = strings.TrimSuffix(resourceName, "-pending")
+	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+
+	isClusterIssuer := false
+	if name.Namespace == o.ClusterResourceNamespace || name.Namespace == "" {
+		var checkIssuer api.Issuer
+		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: name.Namespace}, &checkIssuer)
+		if checkErr != nil && apierrors.IsNotFound(checkErr) {
+			isClusterIssuer = true
+		}
+	}
+
+	annotations := map[string]string{}
+	if isClusterIssuer {
+		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
+	} else {
+		annotations["scep.hshade.io/issuer-name"] = resourceName
+		annotations["scep.hshade.io/issuer-namespace"] = name.Namespace
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name.Name,
-			Namespace: name.Namespace,
-			Labels:    map[string]string{managedByLabelKey: managedByLabelValue},
+			Name:        name.Name,
+			Namespace:   name.Namespace,
+			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
+			Annotations: annotations,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
