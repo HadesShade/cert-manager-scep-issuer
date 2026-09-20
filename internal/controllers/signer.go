@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	issuerapi "github.com/cert-manager/issuer-lib/api/v1alpha1"
@@ -57,6 +59,9 @@ const (
 	// single attempt so a hung SCEP server cannot stall the loop.
 	raRenewalInterval       = 10 * time.Minute
 	raRenewalAttemptTimeout = 2 * time.Minute
+
+	// maxErrorMessageLen bounds error text stored in status conditions.
+	maxErrorMessageLen = 512
 )
 
 var (
@@ -103,6 +108,9 @@ type Issuer struct {
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers/status;issuers/status,verbs=patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// Secrets: get/list/watch because they are read through the manager's cached client
+// (challenge, RA signer and pending secrets); create+update manage the RA signer
+// secret, create+delete manage the pending-enrollment secret. patch is never used.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificaterequests/status,verbs=patch
@@ -262,7 +270,7 @@ func (o *Issuer) Sign(ctx context.Context, cr signer.CertificateRequestObject, i
 
 	signed, err := signerObj.Sign(ctx, certDetails.CSR)
 	if err != nil {
-		return signer.PEMBundle{}, fmt.Errorf("%w: %v", errSignerSign, err)
+		return signer.PEMBundle{}, fmt.Errorf("%w: %s", errSignerSign, sanitizeError(err))
 	}
 
 	bundle, err := pki.ParseSingleCertificateChainPEM(signed)
@@ -356,27 +364,6 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 
 	certPEM, keyPEM := EncodeCertPEM(cert), EncodeKeyPKCS8(key)
 
-	// Build tracking annotations dynamically
-	resourceName := secretName
-	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
-
-	isClusterIssuer := false
-	if namespace == o.ClusterResourceNamespace || namespace == "" {
-		var checkIssuer api.Issuer
-		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, &checkIssuer)
-		if checkErr != nil && apierrors.IsNotFound(checkErr) {
-			isClusterIssuer = true
-		}
-	}
-
-	annotations := map[string]string{}
-	if isClusterIssuer {
-		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
-	} else {
-		annotations["scep.hshade.io/issuer-name"] = resourceName
-		annotations["scep.hshade.io/issuer-namespace"] = namespace
-	}
-
 	if exists {
 		// Update a copy of the existing Secret so its labels, annotations, owner
 		// references, finalizers and any extra keys are preserved.
@@ -385,14 +372,6 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 			updated.Labels = map[string]string{}
 		}
 		updated.Labels[managedByLabelKey] = managedByLabelValue
-
-		if updated.Annotations == nil {
-			updated.Annotations = map[string]string{}
-		}
-		for k, v := range annotations {
-			updated.Annotations[k] = v
-		}
-
 		if updated.Data == nil {
 			updated.Data = map[string][]byte{}
 		}
@@ -407,10 +386,9 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 
 	newSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        secretName,
-			Namespace:   namespace,
-			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
-			Annotations: annotations,
+			Name:      secretName,
+			Namespace: namespace,
+			Labels:    map[string]string{managedByLabelKey: managedByLabelValue},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -426,6 +404,51 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 	}
 
 	return nil
+}
+
+// sanitizeError renders err as a short, printable string that is safe to store in a
+// status condition. When a SCEP server rejects a request it can answer with a binary
+// DER PKIMessage as the HTTP error body, and the SCEP client appends that body to the
+// error text. Control characters make the Kubernetes API reject the status patch
+// ("yaml: control characters are not allowed"), which hides the real error and makes
+// the reconcile fail and retry in a tight loop.
+func sanitizeError(err error) string {
+	if err == nil {
+		return "no data returned"
+	}
+	msg := err.Error()
+
+	// The client formats HTTP failures as "<status>, msg: <body>". Drop a body that
+	// is not text; the status line already carries the reason.
+	const bodyMarker = ", msg: "
+	if i := strings.Index(msg, bodyMarker); i >= 0 && !isPrintableText(msg[i+len(bodyMarker):]) {
+		msg = msg[:i+len(bodyMarker)] + "(binary response body omitted)"
+	}
+
+	msg = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return ' '
+		case r == utf8.RuneError || !unicode.IsPrint(r):
+			return -1
+		default:
+			return r
+		}
+	}, msg)
+
+	if runes := []rune(msg); len(runes) > maxErrorMessageLen {
+		msg = string(runes[:maxErrorMessageLen]) + "…"
+	}
+	return msg
+}
+
+func isPrintableText(s string) bool {
+	for _, r := range s {
+		if r == utf8.RuneError || (!unicode.IsPrint(r) && r != '\n' && r != '\t') {
+			return false
+		}
+	}
+	return true
 }
 
 func isManagedSecret(secret *corev1.Secret) bool {
@@ -531,7 +554,7 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	}
 }
 
-// Signature accept *api.DelegatedSignerConfiguration
+// Signature updated to accept *api.DelegatedSignerConfiguration
 func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	scepClient, caCerts, caCert, err := GetSCEPClient(ctx, issuerSpec)
 	if err != nil {
@@ -574,7 +597,7 @@ func GetSCEPClient(ctx context.Context, issuerSpec *api.IssuerSpec) (scepclient.
 
 	caCertBytes, _, err := c.GetCACert(ctx, "")
 	if err != nil || len(caCertBytes) == 0 {
-		return nil, nil, nil, fmt.Errorf("failed to get CA certs: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get CA certs: %s", sanitizeError(err))
 	}
 
 	caCerts, err := scep.CACerts(caCertBytes)
@@ -648,7 +671,7 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 
 	scepResponseBytes, err := scepClient.PKIOperation(ctx, rawPKIMessage)
 	if err != nil {
-		return nil, nil, fmt.Errorf("PKIOperation failed: %w", err)
+		return nil, nil, fmt.Errorf("PKIOperation failed: %s", sanitizeError(err))
 	}
 	scepResponseMessage, err := scep.ParsePKIMessage(scepResponseBytes, scep.WithCACerts(caCerts))
 	if err != nil {
@@ -718,7 +741,7 @@ func (o *Issuer) PollPendingRAEnrollment(ctx context.Context, scepClient scepcli
 	}
 	respBytes, err := scepClient.PKIOperation(ctx, rawPoll)
 	if err != nil {
-		return nil, nil, fmt.Errorf("PKIOperation (poll) failed: %w", err)
+		return nil, nil, fmt.Errorf("PKIOperation (poll) failed: %s", sanitizeError(err))
 	}
 	respMsg, err := scep.ParsePKIMessage(respBytes, scep.WithCACerts(caCerts))
 	if err != nil {
@@ -779,33 +802,11 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 }
 
 func (o *Issuer) SavePendingSecret(ctx context.Context, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
-	resourceName := name.Name
-	resourceName = strings.TrimSuffix(resourceName, "-pending")
-	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
-
-	isClusterIssuer := false
-	if name.Namespace == o.ClusterResourceNamespace || name.Namespace == "" {
-		var checkIssuer api.Issuer
-		checkErr := o.client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: name.Namespace}, &checkIssuer)
-		if checkErr != nil && apierrors.IsNotFound(checkErr) {
-			isClusterIssuer = true
-		}
-	}
-
-	annotations := map[string]string{}
-	if isClusterIssuer {
-		annotations["scep.hshade.io/clusterissuer-name"] = resourceName
-	} else {
-		annotations["scep.hshade.io/issuer-name"] = resourceName
-		annotations["scep.hshade.io/issuer-namespace"] = name.Namespace
-	}
-
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name.Name,
-			Namespace:   name.Namespace,
-			Labels:      map[string]string{managedByLabelKey: managedByLabelValue},
-			Annotations: annotations,
+			Name:      name.Name,
+			Namespace: name.Namespace,
+			Labels:    map[string]string{managedByLabelKey: managedByLabelValue},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
