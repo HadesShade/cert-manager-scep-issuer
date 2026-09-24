@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/cert-manager/issuer-lib/controllers/signer"
 	api "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
 	"github.com/hadesshade/cert-manager-scep-issuer/internal/controllers"
 	scepclient "github.com/micromdm/scep/v2/client"
@@ -97,7 +98,22 @@ func (s *SCEPSigner) signDirect(ctx context.Context, scepClient scepclient.Clien
 
 	switch respMsg.PKIStatus {
 	case scep.FAILURE:
-		return nil, fmt.Errorf("CA rejected direct enrollment: %s", respMsg.FailInfo)
+		// A CA-side rejection (e.g. "not in authorized signer list") will not
+		// succeed on retry with the same request, and some SCEP servers reuse the
+		// same failed enrollment state for repeat requests with the same
+		// transaction ID. Report it as permanent so issuer-lib stops retrying this
+		// CertificateRequest instead of backing off on it for up to
+		// MaxRetryDuration.
+		//
+		// cert-manager's Certificate controller will retry roughly 1h, 2h, 4h...
+		// capped at 32h. On first issuance (no existing Secret) that retry uses a
+		// fresh private key, so it also gets a fresh SCEP transaction ID. On
+		// renewal, with the default privateKey.rotationPolicy: Never, the key is
+		// reused, so the retry keeps the same transaction ID and may hit the same
+		// cached rejection again - use rotationPolicy: Always if that matters for
+		// this issuer. Either way, this only controls how fast a doomed attempt
+		// is recognized; the underlying CA rejection still needs a config fix.
+		return nil, signer.PermanentError{Err: fmt.Errorf("CA rejected direct enrollment: %s", respMsg.FailInfo)}
 	case scep.PENDING:
 		return nil, fmt.Errorf("direct enrollment is PENDING. Polling direct ephemeral requests is currently unsupported")
 	}
@@ -161,7 +177,8 @@ func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Cl
 
 	switch respMsg.PKIStatus {
 	case scep.FAILURE:
-		return nil, fmt.Errorf("CA rejected delegated enrollment: %s", respMsg.FailInfo)
+		// See the matching comment in signDirect: a CA-side rejection is permanent.
+		return nil, signer.PermanentError{Err: fmt.Errorf("CA rejected delegated enrollment: %s", respMsg.FailInfo)}
 	case scep.PENDING:
 		return nil, fmt.Errorf("enrollment pending CA approval")
 	}

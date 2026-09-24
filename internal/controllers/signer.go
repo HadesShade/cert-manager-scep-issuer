@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -31,15 +32,19 @@ import (
 	"github.com/cert-manager/issuer-lib/controllers"
 	"github.com/cert-manager/issuer-lib/controllers/signer"
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
+	httptransport "github.com/go-kit/kit/transport/http"
 	api "github.com/hadesshade/cert-manager-scep-issuer/api/v1alpha1"
 	scepclient "github.com/micromdm/scep/v2/client"
 	"github.com/micromdm/scep/v2/cryptoutil/x509util"
+	scepserver "github.com/micromdm/scep/v2/server"
 	"github.com/smallstep/pkcs7"
 	"github.com/smallstep/scep"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -383,28 +388,49 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 	}
 
 	if exists {
-		// Update a copy of the existing Secret so its labels, annotations, owner
-		// references, finalizers and any extra keys are preserved.
-		updated := existing.DeepCopy()
-		if updated.Labels == nil {
-			updated.Labels = map[string]string{}
-		}
-		updated.Labels[managedByLabelKey] = managedByLabelValue
+		// The initial o.client.Get above can be stale by the time we get here: the SCEP
+		// round trip in between can take seconds, during which another writer could
+		// have updated this Secret's ResourceVersion. A plain Update would then fail
+		// with a conflict and strand the RA certificate we just obtained from the CA
+		// (it exists only in memory at that point). RetryOnConflict re-fetches and
+		// retries so a freshly issued certificate is not lost to a stale write.
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			latest := &corev1.Secret{}
+			if getErr := o.client.Get(ctx, nn, latest); getErr != nil {
+				return getErr
+			}
 
-		if updated.Annotations == nil {
-			updated.Annotations = map[string]string{}
-		}
-		for k, v := range annotations {
-			updated.Annotations[k] = v
-		}
+			// Re-check ownership against the latest object: it may have been replaced
+			// by something else while we were bootstrapping.
+			if !isManagedSecret(latest) {
+				return fmt.Errorf("%w: %s (add the label %s=%s to allow renewal, or delete the Secret)",
+					errSecretNotManaged, nn, managedByLabelKey, managedByLabelValue)
+			}
 
-		if updated.Data == nil {
-			updated.Data = map[string][]byte{}
-		}
-		updated.Data[corev1.TLSCertKey] = certPEM
-		updated.Data[corev1.TLSPrivateKeyKey] = keyPEM
+			// Update a copy of the latest Secret so its labels, annotations, owner
+			// references, finalizers and any extra keys are preserved.
+			updated := latest.DeepCopy()
+			if updated.Labels == nil {
+				updated.Labels = map[string]string{}
+			}
+			updated.Labels[managedByLabelKey] = managedByLabelValue
 
-		if err := o.client.Update(ctx, updated); err != nil {
+			if updated.Annotations == nil {
+				updated.Annotations = map[string]string{}
+			}
+			for k, v := range annotations {
+				updated.Annotations[k] = v
+			}
+
+			if updated.Data == nil {
+				updated.Data = map[string][]byte{}
+			}
+			updated.Data[corev1.TLSCertKey] = certPEM
+			updated.Data[corev1.TLSPrivateKeyKey] = keyPEM
+
+			return o.client.Update(ctx, updated)
+		})
+		if err != nil {
 			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf("failed to update expiring signer secret: %w", err))
 		}
 		return nil
@@ -425,6 +451,9 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 	}
 	if err := o.client.Create(ctx, newSecret); err != nil {
 		if apierrors.IsAlreadyExists(err) {
+			// Another reconcile (or replica) created it first; discard this enrollment
+			// and keep whichever landed first rather than fighting over it.
+			ctrl.LoggerFrom(ctx).Info("signer secret was created concurrently; discarding this RA enrollment", "secret", nn.String())
 			return nil
 		}
 		return fmt.Errorf("failed to create signer secret: %w", err)
@@ -608,18 +637,36 @@ func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSp
 	}
 }
 
+// GetSCEPClient builds a SCEP client with its own *http.Client, rather than the
+// package-level scepclient.New (which always uses http.DefaultClient). Mutating
+// http.DefaultClient.Transport per-issuer, as this used to do, is a data race with
+// concurrent reconciles, and one issuer with insecureSkipVerify would silently turn
+// off TLS verification for every HTTP call in the whole process.
 func GetSCEPClient(ctx context.Context, issuerSpec *api.IssuerSpec) (scepclient.Client, []*x509.Certificate, *x509.Certificate, error) {
+	httpClient := &http.Client{Timeout: 60 * time.Second}
 	if issuerSpec.InsecureSkipVerify {
 		customTransport := http.DefaultTransport.(*http.Transport).Clone()
 		customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		http.DefaultClient.Transport = customTransport
-	} else {
-		http.DefaultClient.Transport = http.DefaultTransport
+		httpClient.Transport = customTransport
 	}
 
-	c, err := scepclient.New(issuerSpec.URL, log.NewNopLogger())
+	instance := issuerSpec.URL
+	if !strings.HasPrefix(instance, "http") {
+		instance = "http://" + instance
+	}
+	tgt, err := url.Parse(instance)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create SCEP client: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to parse SCEP URL: %w", err)
+	}
+
+	logger := level.Info(log.NewNopLogger())
+	c := &scepserver.Endpoints{
+		GetEndpoint: scepserver.EndpointLoggingMiddleware(logger)(
+			httptransport.NewClient("GET", tgt, scepserver.EncodeSCEPRequest, scepserver.DecodeSCEPResponse,
+				httptransport.SetClient(httpClient)).Endpoint()),
+		PostEndpoint: scepserver.EndpointLoggingMiddleware(logger)(
+			httptransport.NewClient("POST", tgt, scepserver.EncodeSCEPRequest, scepserver.DecodeSCEPResponse,
+				httptransport.SetClient(httpClient)).Endpoint()),
 	}
 
 	caCertBytes, _, err := c.GetCACert(ctx, "")
@@ -696,6 +743,19 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 		return nil, nil, err
 	}
 
+	// Persist the RA bootstrap identity (key, self-signed cert, transaction ID) before
+	// contacting the SCEP server, not only on a PENDING response as before. If the
+	// PKIOperation call succeeds but the controller crashes or is killed before the
+	// caller can write the signer Secret, the enrollment would otherwise be lost with
+	// no way to recover it: the CA has already issued a certificate for a raKey that
+	// no longer exists anywhere. With the pending Secret saved first, the next
+	// reconcile finds it and calls PollPendingRAEnrollment, which can retrieve the
+	// already-issued certificate from the CA using the same transaction ID, instead of
+	// silently starting a brand new enrollment.
+	if err := o.SavePendingSecret(ctx, pendingName, bootstrapCert, raKey, transactionID); err != nil {
+		return nil, nil, fmt.Errorf("failed to save pending enrollment state: %w", err)
+	}
+
 	scepResponseBytes, err := scepClient.PKIOperation(ctx, rawPKIMessage)
 	if err != nil {
 		return nil, nil, fmt.Errorf("PKIOperation failed: %s", sanitizeError(err))
@@ -707,17 +767,17 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 
 	switch scepResponseMessage.PKIStatus {
 	case scep.FAILURE:
+		o.DeletePendingSecret(ctx, pendingName)
 		return nil, nil, fmt.Errorf("RA bootstrap enrollment FAILED: %s", scepResponseMessage.FailInfo)
 	case scep.PENDING:
-		if err := o.SavePendingSecret(ctx, pendingName, bootstrapCert, raKey, transactionID); err != nil {
-			return nil, nil, fmt.Errorf("failed to save pending enrollment state: %w", err)
-		}
+		// Already persisted above; nothing more to save.
 		return nil, nil, errStillPending
 	}
 
 	if err := scepResponseMessage.DecryptPKIEnvelope(bootstrapCert, raKey); err != nil {
 		return nil, nil, err
 	}
+	o.DeletePendingSecret(ctx, pendingName)
 	return scepResponseMessage.Certificate, raKey, nil
 }
 
