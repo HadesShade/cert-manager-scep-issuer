@@ -43,10 +43,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -103,6 +105,7 @@ type Issuer struct {
 	ClusterResourceNamespace string
 
 	client client.Client
+	scheme *runtime.Scheme
 
 	// signerLocks serializes RA bootstrap/renewal per signer Secret: both Check()
 	// and the background renewal loop can run it. Values are 1-slot channels so
@@ -122,6 +125,7 @@ type Issuer struct {
 
 func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	s.client = mgr.GetClient()
+	s.scheme = mgr.GetScheme()
 
 	// issuer-lib only calls Check() when an issuer's spec changes or after an
 	// error, never periodically, so a Ready issuer would never renew its RA
@@ -235,7 +239,7 @@ func (o *Issuer) Check(ctx context.Context, issuerObject issuerapi.Issuer) error
 
 		case issuerSpec.DelegatedSignerConfiguration != nil:
 			secretName := delegatedSignerSecretName(issuerObject)
-			if err := o.EnsureDelegatingSignerSecret(ctx, issuerSpec, issuerSpec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
+			if err := o.EnsureDelegatingSignerSecret(ctx, issuerObject, issuerSpec, issuerSpec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
 				return err
 			}
 			_, err := o.GetDelegatingSignerSecretData(ctx, secretName, namespace, issuerSpec)
@@ -305,7 +309,7 @@ func (o *Issuer) ResolveSignerSecretData(ctx context.Context, issuerSpec *api.Is
 	}
 }
 
-func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *api.IssuerSpec, cfg *api.DelegatedSignerConfiguration, namespace, secretName string) error {
+func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject issuerapi.Issuer, issuerSpec *api.IssuerSpec, cfg *api.DelegatedSignerConfiguration, namespace, secretName string) error {
 	nn := types.NamespacedName{Namespace: namespace, Name: secretName}
 
 	unlock, lockErr := o.lockSigner(ctx, nn)
@@ -359,7 +363,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 	}
 
 	// Updated call passing the entire cfg object
-	cert, key, err := o.BootstrapDelegatingSignerIdentity(ctx, issuerSpec, namespace, secretName, cfg, challengePassword)
+	cert, key, err := o.BootstrapDelegatingSignerIdentity(ctx, issuerObject, issuerSpec, namespace, secretName, cfg, challengePassword)
 	if err != nil {
 		return tolerateRenewalError(ctx, nn, hasValidCert, err)
 	}
@@ -415,6 +419,12 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 			}
 			updated.Labels[managedByLabelKey] = managedByLabelValue
 
+			// Backfills the owner reference on a Secret created before this was added
+			// (e.g. by an earlier version of the controller); idempotent otherwise.
+			if err := controllerutil.SetControllerReference(issuerObject, updated, o.scheme); err != nil {
+				return fmt.Errorf("failed to set owner reference on signer secret: %w", err)
+			}
+
 			if updated.Annotations == nil {
 				updated.Annotations = map[string]string{}
 			}
@@ -448,6 +458,15 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerSpec *a
 			corev1.TLSCertKey:       certPEM,
 			corev1.TLSPrivateKeyKey: keyPEM,
 		},
+	}
+	// Owning the Secret means it is garbage-collected automatically when the
+	// Issuer/ClusterIssuer is deleted, instead of being left behind holding a
+	// private key. issuerapi.Issuer already embeds runtime.Object and
+	// metav1.Object, so it can be used directly as the owner. For a
+	// ClusterIssuer (cluster-scoped), SetControllerReference skips its
+	// namespace check, so a namespaced Secret can be owned by it.
+	if err := controllerutil.SetControllerReference(issuerObject, newSecret, o.scheme); err != nil {
+		return fmt.Errorf("failed to set owner reference on signer secret: %w", err)
 	}
 	if err := o.client.Create(ctx, newSecret); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -605,13 +624,13 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	attemptCtx, cancel := context.WithTimeout(ctx, raRenewalAttemptTimeout)
 	defer cancel()
 
-	if err := o.EnsureDelegatingSignerSecret(attemptCtx, spec, spec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
+	if err := o.EnsureDelegatingSignerSecret(attemptCtx, issuerObject, spec, spec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
 		log.Error(err, "RA signer renewal failed")
 	}
 }
 
 // Signature accept *api.DelegatedSignerConfiguration
-func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
+func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerObject issuerapi.Issuer, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	scepClient, caCerts, caCert, err := GetSCEPClient(ctx, issuerSpec)
 	if err != nil {
 		return nil, nil, err
@@ -630,7 +649,7 @@ func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerSp
 		return o.PollPendingRAEnrollment(ctx, scepClient, caCerts, caCert, bootstrapCert, raKey, txID, pendingName)
 
 	case apierrors.IsNotFound(err):
-		return o.StartNewRABootstrap(ctx, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
+		return o.StartNewRABootstrap(ctx, issuerObject, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
 
 	default:
 		return nil, nil, fmt.Errorf("failed to check for pending enrollment secret: %w", err)
@@ -686,7 +705,7 @@ func GetSCEPClient(ctx context.Context, issuerSpec *api.IssuerSpec) (scepclient.
 }
 
 // Signature updated to accept *api.DelegatedSignerConfiguration and map Subject/DNS fields
-func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.Client, caCerts []*x509.Certificate, caCert *x509.Certificate, cfg *api.DelegatedSignerConfiguration, challengePassword string, pendingName types.NamespacedName) (*x509.Certificate, *rsa.PrivateKey, error) {
+func (o *Issuer) StartNewRABootstrap(ctx context.Context, issuerObject issuerapi.Issuer, scepClient scepclient.Client, caCerts []*x509.Certificate, caCert *x509.Certificate, cfg *api.DelegatedSignerConfiguration, challengePassword string, pendingName types.NamespacedName) (*x509.Certificate, *rsa.PrivateKey, error) {
 	raKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
@@ -752,7 +771,7 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, scepClient scepclient.
 	// reconcile finds it and calls PollPendingRAEnrollment, which can retrieve the
 	// already-issued certificate from the CA using the same transaction ID, instead of
 	// silently starting a brand new enrollment.
-	if err := o.SavePendingSecret(ctx, pendingName, bootstrapCert, raKey, transactionID); err != nil {
+	if err := o.SavePendingSecret(ctx, issuerObject, pendingName, bootstrapCert, raKey, transactionID); err != nil {
 		return nil, nil, fmt.Errorf("failed to save pending enrollment state: %w", err)
 	}
 
@@ -888,7 +907,7 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 	return signedData.Finish()
 }
 
-func (o *Issuer) SavePendingSecret(ctx context.Context, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
+func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
 	resourceName := name.Name
 	resourceName = strings.TrimSuffix(resourceName, "-pending")
 	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
@@ -923,6 +942,9 @@ func (o *Issuer) SavePendingSecret(ctx context.Context, name types.NamespacedNam
 			"tls.key":        EncodeKeyPKCS8(raKey),
 			"transaction-id": []byte(txID),
 		},
+	}
+	if err := controllerutil.SetControllerReference(issuerObject, secret, o.scheme); err != nil {
+		return fmt.Errorf("failed to set owner reference on pending secret: %w", err)
 	}
 	if err := o.client.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
