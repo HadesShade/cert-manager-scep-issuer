@@ -114,6 +114,15 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+PODMAN_PLATFORMS ?= linux/amd64,linux/arm64,linux/arm/v7,linux/s390x,linux/ppc64le
+.PHONY: podman-build
+docker-build: ## Build docker image with the manager.
+	$(CONTAINER_TOOL) build --platform=${PODMAN_PLATFORMS} --build-arg VERSION=$(VERSION) -t ${IMG} .
+
+.PHONY: podman-push
+docker-push: ## Push docker image with the manager.
+	$(CONTAINER_TOOL) push ${IMG}
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
