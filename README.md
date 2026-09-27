@@ -12,7 +12,7 @@ This project bridges the gap between modern cloud-native Kubernetes workloads an
 
 ## 🏗️ Architecture & Enrollment Modes
 
-Because `cert-manager` inherently generates and signs the inner PKCS#10 CSR before handing it to external controllers, this issuer implements two distinct architectures to handle SCEP's `challengePassword` requirements.
+Because `cert-manager` inherently generates and signs the inner PKCS#10 CSR before handing it to external controllers, this issuer implements two distinct enrollment architectures: one that satisfies SCEP's `challengePassword`/signer-trust authentication requirement via a persistent RA identity, and one for endpoints that don't enforce that requirement at all.
 
 ### 1. Delegated Mode (Recommended / Enterprise Standard)
 **Best for:** Strict RFC-compliant CAs like **OpenXPKI** and **EJBCA**.
@@ -21,10 +21,10 @@ In Delegated Mode, the controller uses a bootstrap secret challenge to enroll a 
 * **Advantage:** Completely bypasses the need for individual leaf challenge passwords, overcoming the cryptographic limitation of injecting attributes into pre-signed cert-manager CSRs.
 
 ### 2. Direct Mode
-**Best for:** CAs configured for auto-approval (no challenge passwords required) like MicroMDM.
+**Best for:** SCEP endpoints configured to accept requests without per-request authentication (e.g. a MicroMDM SCEP server configured for auto-approval).
 
-In Direct Mode, the controller submits the cert-manager generated leaf CSR directly to the SCEP endpoint. 
-* **Limitation:** Direct Mode does **not** support challenge passwords (`challengeSecretRef`). Strict SCEP servers require the `challengePassword` embedded inside the mathematically signed inner CSR. Because cert-manager isolates private keys, external controllers cannot modify the inner CSR attributes without invalidating its signature. Direct Mode is strictly reserved for auto-approving endpoints.
+In Direct Mode, the controller wraps the cert-manager generated leaf CSR in a standard SCEP `PKIOperation` message, signed with a throwaway, self-signed identity generated fresh for that request (SCEP requires every request to be signed by *something*, even on first enrollment). Since that signer has no established trust with the CA, this only works against SCEP endpoints that accept requests without checking signer trust or a challenge password.
+* **Limitation:** Direct Mode does **not** support challenge passwords (`challengeSecretRef`). Strict SCEP servers require the `challengePassword` embedded inside the mathematically signed inner CSR. Because cert-manager isolates private keys, external controllers cannot modify the inner CSR attributes without invalidating its signature. Direct Mode is strictly reserved for endpoints that don't enforce challenge-password or signer-trust checks.
 
 ---
 
@@ -116,9 +116,9 @@ spec:
     - my-app.local
 ```
 
-### Example 2: Direct Mode (Auto-Approving Endpoints)
+### Example 2: Direct Mode (Endpoints Without Signer-Trust or Challenge Checks)
 
-Direct Mode submits requests directly to the SCEP server without challenge authentication.
+Direct Mode signs requests with a throwaway identity rather than an established one, so it only works against SCEP endpoints that don't check for either a trusted signer or a challenge password.
 
 ```yaml
 apiVersion: scep.hshade.io/v1alpha1
