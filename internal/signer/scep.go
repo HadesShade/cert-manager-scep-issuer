@@ -122,7 +122,7 @@ func (s *SCEPSigner) signDirect(ctx context.Context, scepClient scepclient.Clien
 		return nil, fmt.Errorf("failed to decrypt CA response: %w", err)
 	}
 
-	return controllers.EncodeCertPEM(respMsg.Certificate), nil
+	return controllers.CertRepPEM(respMsg, ephemeralCert, ephemeralKey, caCerts), nil
 }
 
 func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Client, caCerts []*x509.Certificate, caCert *x509.Certificate, csr []byte) ([]byte, error) {
@@ -153,7 +153,7 @@ func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Cl
 					if err := pollRespMsg.DecryptPKIEnvelope(signerCert, signerKey); err != nil {
 						return nil, fmt.Errorf("failed to decrypt polled CA response: %w", err)
 					}
-					return controllers.EncodeCertPEM(pollRespMsg.Certificate), nil
+					return controllers.CertRepPEM(pollRespMsg, signerCert, signerKey, caCerts), nil
 				case scep.PENDING:
 					return nil, fmt.Errorf("enrollment still pending CA approval")
 				}
@@ -187,7 +187,7 @@ func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Cl
 		return nil, fmt.Errorf("failed to decrypt CA response: %w", err)
 	}
 
-	return controllers.EncodeCertPEM(respMsg.Certificate), nil
+	return controllers.CertRepPEM(respMsg, signerCert, signerKey, caCerts), nil
 }
 
 func buildDirectPKIMessage(csrRaw []byte, caCert, signerCert *x509.Certificate, signerKey *rsa.PrivateKey) ([]byte, error) {

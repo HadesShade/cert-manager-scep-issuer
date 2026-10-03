@@ -276,7 +276,7 @@ func (o *Issuer) Sign(ctx context.Context, cr signer.CertificateRequestObject, i
 
 	signed, err := signerObj.Sign(ctx, certDetails.CSR)
 	if err != nil {
-		return signer.PEMBundle{}, fmt.Errorf("%w: %s", errSignerSign, sanitizeError(err))
+		return signer.PEMBundle{}, wrapSignError(err)
 	}
 
 	bundle, err := pki.ParseSingleCertificateChainPEM(signed)
@@ -515,6 +515,14 @@ func sanitizeError(err error) string {
 		msg = string(runes[:maxErrorMessageLen]) + "…"
 	}
 	return msg
+}
+
+func wrapSignError(err error) error {
+	wrapped := fmt.Errorf("%w: %s", errSignerSign, sanitizeError(err))
+	if errors.As(err, &signer.PermanentError{}) {
+		return signer.PermanentError{Err: wrapped}
+	}
+	return wrapped
 }
 
 func isPrintableText(s string) bool {
