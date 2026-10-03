@@ -153,7 +153,7 @@ make run
 
 ### Building and Pushing Images
 ```bash
-make docker-build docker-push IMG=ghcr.io/hadesshade/cert-manager-scep-issuer:latest
+make docker-build docker-push IMG=<your-registry>/scep-issuer:v0.1.0
 ```
 
 ## 📜 License
