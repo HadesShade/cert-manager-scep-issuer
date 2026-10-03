@@ -15,3 +15,7 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+
+approver:
+  enabled: true
+  certManagerServiceAccount: cert-manager

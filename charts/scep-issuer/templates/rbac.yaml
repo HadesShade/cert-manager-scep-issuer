@@ -48,3 +48,31 @@ roleRef:
   kind: ClusterRole
   name: {{ include "scep-issuer.fullname" . }}-manager
   apiGroup: rbac.authorization.k8s.io
+
+{{- if .Values.approver.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "scep-issuer.fullname" . }}-approve
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["signers"]
+    resourceNames:
+      - issuers.scep.hshade.io/*
+      - clusterissuers.scep.hshade.io/*
+    verbs: ["approve"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "scep-issuer.fullname" . }}-approve
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "scep-issuer.fullname" . }}-approve
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.approver.certManagerServiceAccount }}
+    namespace: {{ .Values.clusterResourceNamespace }}
+{{- end }}
