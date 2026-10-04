@@ -333,10 +333,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 	hasValidCert := false
 	if exists {
 		if cert, _, parseErr := ParseTLSPair(existing.Data[corev1.TLSCertKey], existing.Data[corev1.TLSPrivateKeyKey]); parseErr == nil {
-			renewalThreshold := 720 * time.Hour // Default 30 days
-			if cfg.RenewalWindow != nil {
-				renewalThreshold = cfg.RenewalWindow.Duration
-			}
+			renewalThreshold := raRenewalThreshold(cert, cfg.RenewalWindow)
 
 			remaining := time.Until(cert.NotAfter)
 			if remaining > renewalThreshold {
