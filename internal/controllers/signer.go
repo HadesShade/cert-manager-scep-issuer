@@ -152,11 +152,11 @@ func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	}).SetupWithManager(ctx, mgr)
 }
 
-func (o *Issuer) recordEvent(issuerObject issuerapi.Issuer, eventType, reason, action, format string, args ...any) {
+func (o *Issuer) recordEvent(issuerObject issuerapi.Issuer, eventType, reason, format string, args ...any) {
 	if o.recorder == nil {
 		return
 	}
-	o.recorder.Eventf(issuerObject, nil, eventType, reason, action, format, args...)
+	o.recorder.Eventf(issuerObject, nil, eventType, reason, "RenewingSigner", format, args...)
 }
 
 func (o *Issuer) GetIssuerDetails(issuerObject issuerapi.Issuer) (*api.IssuerSpec, string, error) {
@@ -363,7 +363,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 				// window. The current certificate keeps signing until the new
 				// one is in place (see tolerateRenewalError).
 				ctrl.LoggerFrom(ctx).Info("RA configuration changed since the signer certificate was requested; re-enrolling", "secret", nn.String())
-				o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerReenrolling", "RenewingSigner",
+				o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerReenrolling",
 					"The RA configuration changed after the signer certificate was requested. A new RA certificate is being requested; the current one keeps signing until it is issued.")
 			}
 		}
@@ -460,7 +460,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 		if err != nil {
 			return o.tolerateRenewalError(ctx, issuerObject, nn, hasValidCert, fmt.Errorf("failed to update expiring signer secret: %w", err))
 		}
-		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerRenewed", "RenewingSigner",
+		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerRenewed",
 			"A new RA signer certificate was issued and is now in use.")
 		return nil
 	}
@@ -569,11 +569,11 @@ func (o *Issuer) tolerateRenewalError(ctx context.Context, issuerObject issuerap
 	log := ctrl.LoggerFrom(ctx).WithValues("secret", nn.String())
 	if errors.Is(err, errStillPending) {
 		log.Info("RA signer renewal is awaiting approval; continuing with the current RA certificate")
-		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerAwaitingApproval", "RenewingSigner",
+		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerAwaitingApproval",
 			"A new RA signer certificate was requested and is waiting for approval on the CA. The current RA certificate keeps signing until then.")
 	} else {
 		log.Error(err, "RA signer renewal failed; continuing with the current RA certificate, will retry")
-		o.recordEvent(issuerObject, corev1.EventTypeWarning, "RASignerRenewalFailed", "RenewingSigner",
+		o.recordEvent(issuerObject, corev1.EventTypeWarning, "RASignerRenewalFailed",
 			"Renewing the RA signer certificate failed and will be retried. The current RA certificate keeps signing. Error: %s", sanitizeError(err))
 	}
 	return nil
