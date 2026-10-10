@@ -372,6 +372,12 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 					"The RA configuration changed after the signer certificate was requested. A new RA certificate is being requested; the current one keeps signing until it is issued.")
 			}
 		}
+		// Never overwrite a Secret this controller did not create.
+		if !isManagedSecret(&existing) {
+			return o.tolerateRenewalError(ctx, issuerObject, nn, hasValidCert, fmt.Errorf(
+				"%w: %s (add the label %s=%s to allow renewal, or delete the Secret)",
+				errSecretNotManaged, nn, managedByLabelKey, managedByLabelValue))
+		}
 	}
 
 	var challengePassword string
