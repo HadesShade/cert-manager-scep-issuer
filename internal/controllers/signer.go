@@ -70,6 +70,11 @@ const (
 	raRenewalAttemptTimeout = 2 * time.Minute
 	raPendingPollInterval   = 30 * time.Second
 
+	// raKickAnnotation is set to make issuer-lib re-run Check() right away. It
+	// reconciles an Issuer whenever its annotations change; otherwise a NotReady issuer
+	// is only retried on a backoff that can reach many minutes.
+	raKickAnnotation = "scep.hshade.io/ra-signer-enrolled-at"
+
 	// maxErrorMessageLen bounds error text stored in status conditions.
 	maxErrorMessageLen = 512
 )
@@ -117,7 +122,7 @@ type Issuer struct {
 	recorder    events.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers/status;issuers/status,verbs=patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
@@ -594,9 +599,7 @@ func (o *Issuer) lockSigner(ctx context.Context, nn types.NamespacedName) (func(
 
 // renewDelegatedSigners periodically retries RA signer renewal (including polling a
 // pending renewal) for every Delegated issuer that manages its own signer Secret.
-// Check every 30 seconds.
 func (o *Issuer) renewDelegatedSigners(ctx context.Context) error {
-
 	ticker := time.NewTicker(raPendingPollInterval)
 	defer ticker.Stop()
 
@@ -607,13 +610,15 @@ func (o *Issuer) renewDelegatedSigners(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case now := <-ticker.C:
-			isPending := o.hasPendingEnrollment(ctx)
-			timeSinceLastFull := now.Sub(lastFullRenewal)
-
-			// Execute if an enrollment is pending OR if 10 minutes have passed
-			if isPending || timeSinceLastFull >= raRenewalInterval {
-				o.renewAllDelegatedSigners(ctx)
+			switch {
+			case now.Sub(lastFullRenewal) >= raRenewalInterval:
+				// Full pass: renews expiring certificates and retries failures.
+				o.renewAllDelegatedSigners(ctx, false)
 				lastFullRenewal = time.Now()
+			case o.hasPendingEnrollment(ctx):
+				// Fast pass: only polls enrollments already waiting for approval.
+				// It never starts a new request, so it cannot hammer the CA.
+				o.renewAllDelegatedSigners(ctx, true)
 			}
 		}
 	}
@@ -634,7 +639,7 @@ func (o *Issuer) hasPendingEnrollment(ctx context.Context) bool {
 	return false
 }
 
-func (o *Issuer) renewAllDelegatedSigners(ctx context.Context) {
+func (o *Issuer) renewAllDelegatedSigners(ctx context.Context, pendingOnly bool) {
 	log := ctrl.LoggerFrom(ctx).WithName("ra-renewal")
 
 	var issuers api.IssuerList
@@ -642,7 +647,7 @@ func (o *Issuer) renewAllDelegatedSigners(ctx context.Context) {
 		log.Error(err, "failed to list Issuers")
 	} else {
 		for i := range issuers.Items {
-			o.renewDelegatedSigner(ctx, &issuers.Items[i])
+			o.renewDelegatedSigner(ctx, &issuers.Items[i], pendingOnly)
 		}
 	}
 
@@ -651,12 +656,12 @@ func (o *Issuer) renewAllDelegatedSigners(ctx context.Context) {
 		log.Error(err, "failed to list ClusterIssuers")
 	} else {
 		for i := range clusterIssuers.Items {
-			o.renewDelegatedSigner(ctx, &clusterIssuers.Items[i])
+			o.renewDelegatedSigner(ctx, &clusterIssuers.Items[i], pendingOnly)
 		}
 	}
 }
 
-func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerapi.Issuer) {
+func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerapi.Issuer, pendingOnly bool) {
 	spec, namespace, err := o.GetIssuerDetails(issuerObject)
 	if err != nil ||
 		spec.EnrollmentMode != api.Delegated ||
@@ -668,13 +673,22 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	log := ctrl.LoggerFrom(ctx).WithName("ra-renewal").WithValues("issuer", issuerObject.GetName(), "namespace", namespace)
 	secretName := delegatedSignerSecretName(issuerObject)
 
-	// Renewal only: the initial enrollment is driven by Check(), which has its own
-	// retry/backoff and reports failures in the issuer status.
+	// A pending enrollment is one that is already waiting for approval on the CA.
+	var pending corev1.Secret
+	hasPending := o.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName + pendingSecretSuffix}, &pending) == nil
+
 	var existing corev1.Secret
-	if err := o.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &existing); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to look up RA signer secret")
-		}
+	getErr := o.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &existing)
+	firstEnrollment := apierrors.IsNotFound(getErr)
+	if getErr != nil && !firstEnrollment {
+		log.Error(getErr, "failed to look up RA signer secret")
+		return
+	}
+
+	// Check() starts a first enrollment and owns its failures and retries. This loop
+	// only completes one that is already waiting for approval, and the fast pass
+	// never starts a new request.
+	if (firstEnrollment || pendingOnly) && !hasPending {
 		return
 	}
 
@@ -682,7 +696,18 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	defer cancel()
 
 	if err := o.EnsureDelegatingSignerSecret(attemptCtx, issuerObject, spec, spec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
-		log.Error(err, "RA signer renewal failed")
+		if errors.Is(err, errStillPending) {
+			log.V(1).Info("RA signer enrollment is still awaiting approval")
+		} else {
+			log.Error(err, "RA signer renewal failed")
+		}
+		return
+	}
+
+	if firstEnrollment {
+		// The Secret exists now, but issuer-lib would only re-run Check() on its own
+		// retry backoff, so make it do that right away.
+		o.kickIssuer(ctx, issuerObject)
 	}
 }
 
@@ -1058,4 +1083,28 @@ func ParseTLSPair(certPEM, keyPEM []byte) (*x509.Certificate, *rsa.PrivateKey, e
 		return nil, nil, fmt.Errorf("signer key is not RSA")
 	}
 	return cert, key, nil
+}
+
+func (o *Issuer) kickIssuer(ctx context.Context, issuerObject issuerapi.Issuer) {
+	log := ctrl.LoggerFrom(ctx).WithName("ra-renewal").WithValues("issuer", issuerObject.GetName())
+
+	obj, ok := issuerObject.DeepCopyObject().(client.Object)
+	if !ok {
+		return
+	}
+	base, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return
+	}
+
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[raKickAnnotation] = time.Now().UTC().Format(time.RFC3339)
+	obj.SetAnnotations(annotations)
+
+	if err := o.client.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
+		log.Error(err, "failed to trigger an issuer re-check after RA enrollment; it will become Ready on its next retry")
+	}
 }

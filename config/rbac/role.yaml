@@ -67,6 +67,7 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - scep.hshade.io

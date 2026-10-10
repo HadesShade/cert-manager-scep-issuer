@@ -11,7 +11,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["scep.hshade.io"]
     resources: ["issuers", "clusterissuers"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["scep.hshade.io"]
     resources: ["issuers/status", "clusterissuers/status"]
     verbs: ["patch"]
