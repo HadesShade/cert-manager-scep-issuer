@@ -45,6 +45,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -63,9 +64,11 @@ const (
 
 	// raRenewalInterval is how often the background loop re-checks the RA signer
 	// certificate of every Delegated issuer. raRenewalAttemptTimeout bounds a
-	// single attempt so a hung SCEP server cannot stall the loop.
+	// single attempt so a hung SCEP server cannot stall the loop. raPendingPollInterval is how often
+	// the background reconciliation re-checks the pending issuer.
 	raRenewalInterval       = 10 * time.Minute
 	raRenewalAttemptTimeout = 2 * time.Minute
+	raPendingPollInterval   = 30 * time.Second
 
 	// maxErrorMessageLen bounds error text stored in status conditions.
 	maxErrorMessageLen = 512
@@ -111,6 +114,7 @@ type Issuer struct {
 	// and the background renewal loop can run it. Values are 1-slot channels so
 	// waiting for the lock can honour context cancellation.
 	signerLocks sync.Map
+	recorder    events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=scep.hshade.io,resources=clusterissuers;issuers,verbs=get;list;watch
@@ -126,6 +130,7 @@ type Issuer struct {
 func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	s.client = mgr.GetClient()
 	s.scheme = mgr.GetScheme()
+	s.recorder = mgr.GetEventRecorder("issuer.cert-manager.io")
 
 	// issuer-lib only calls Check() when an issuer's spec changes or after an
 	// error, never periodically, so a Ready issuer would never renew its RA
@@ -143,8 +148,15 @@ func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 
 		Sign:          s.Sign,
 		Check:         s.Check,
-		EventRecorder: mgr.GetEventRecorder("issuer.cert-manager.io"),
+		EventRecorder: s.recorder,
 	}).SetupWithManager(ctx, mgr)
+}
+
+func (o *Issuer) recordEvent(issuerObject issuerapi.Issuer, eventType, reason, action, format string, args ...any) {
+	if o.recorder == nil {
+		return
+	}
+	o.recorder.Eventf(issuerObject, nil, eventType, reason, action, format, args...)
 }
 
 func (o *Issuer) GetIssuerDetails(issuerObject issuerapi.Issuer) (*api.IssuerSpec, string, error) {
@@ -327,6 +339,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 		exists = false
 	}
 
+	wantHash := raConfigHash(cfg)
 	// hasValidCert: the Secret holds an RA certificate that has not expired yet.
 	// While it does, a failed or pending renewal is only logged (see
 	// tolerateRenewalError) so the issuer keeps signing with the current one.
@@ -336,17 +349,23 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 			renewalThreshold := raRenewalThreshold(cert, cfg.RenewalWindow)
 
 			remaining := time.Until(cert.NotAfter)
-			if remaining > renewalThreshold {
-				return nil
-			}
 			hasValidCert = remaining > 0
-		}
-
-		// Never overwrite a Secret this controller did not create.
-		if !isManagedSecret(&existing) {
-			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf(
-				"%w: %s (add the label %s=%s to allow renewal, or delete the Secret)",
-				errSecretNotManaged, nn, managedByLabelKey, managedByLabelValue))
+			if remaining > renewalThreshold {
+				switch raConfigStateOf(&existing, wantHash) {
+				case raConfigInSync:
+					return nil
+				case raConfigUnknown:
+					o.stampRAConfigHash(ctx, nn, wantHash)
+					return nil
+				}
+				// The RA configuration was edited after this certificate was
+				// requested. Re-enroll now instead of waiting for the renewal
+				// window. The current certificate keeps signing until the new
+				// one is in place (see tolerateRenewalError).
+				ctrl.LoggerFrom(ctx).Info("RA configuration changed since the signer certificate was requested; re-enrolling", "secret", nn.String())
+				o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerReenrolling", "RenewingSigner",
+					"The RA configuration changed after the signer certificate was requested. A new RA certificate is being requested; the current one keeps signing until it is issued.")
+			}
 		}
 	}
 
@@ -354,7 +373,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 	if issuerSpec.ChallengeSecretRef != nil {
 		passwordPtr, err := o.GetChallengePassword(ctx, issuerSpec, namespace)
 		if err != nil {
-			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf("failed to read bootstrap challenge password: %w", err))
+			return o.tolerateRenewalError(ctx, issuerObject, nn, hasValidCert, fmt.Errorf("failed to read bootstrap challenge password: %w", err))
 		}
 		challengePassword = *passwordPtr
 	}
@@ -362,7 +381,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 	// Updated call passing the entire cfg object
 	cert, key, err := o.BootstrapDelegatingSignerIdentity(ctx, issuerObject, issuerSpec, namespace, secretName, cfg, challengePassword)
 	if err != nil {
-		return tolerateRenewalError(ctx, nn, hasValidCert, err)
+		return o.tolerateRenewalError(ctx, issuerObject, nn, hasValidCert, err)
 	}
 
 	certPEM, keyPEM := EncodeCertPEM(cert), EncodeKeyPKCS8(key)
@@ -388,6 +407,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 		annotations["scep.hshade.io/issuer-namespace"] = namespace
 	}
 
+	annotations[raConfigHashAnnotation] = wantHash
 	if exists {
 		// The initial o.client.Get above can be stale by the time we get here: the SCEP
 		// round trip in between can take seconds, during which another writer could
@@ -438,8 +458,10 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 			return o.client.Update(ctx, updated)
 		})
 		if err != nil {
-			return tolerateRenewalError(ctx, nn, hasValidCert, fmt.Errorf("failed to update expiring signer secret: %w", err))
+			return o.tolerateRenewalError(ctx, issuerObject, nn, hasValidCert, fmt.Errorf("failed to update expiring signer secret: %w", err))
 		}
+		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerRenewed", "RenewingSigner",
+			"A new RA signer certificate was issued and is now in use.")
 		return nil
 	}
 
@@ -539,7 +561,7 @@ func isManagedSecret(secret *corev1.Secret) bool {
 // still-valid RA certificate exists, so the issuer stays Ready and keeps signing
 // with it. Without a valid certificate (initial enrollment, or already expired) the
 // error is returned so the issuer reports NotReady as before.
-func tolerateRenewalError(ctx context.Context, nn types.NamespacedName, hasValidCert bool, err error) error {
+func (o *Issuer) tolerateRenewalError(ctx context.Context, issuerObject issuerapi.Issuer, nn types.NamespacedName, hasValidCert bool, err error) error {
 	if !hasValidCert {
 		return err
 	}
@@ -547,8 +569,12 @@ func tolerateRenewalError(ctx context.Context, nn types.NamespacedName, hasValid
 	log := ctrl.LoggerFrom(ctx).WithValues("secret", nn.String())
 	if errors.Is(err, errStillPending) {
 		log.Info("RA signer renewal is awaiting approval; continuing with the current RA certificate")
+		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerAwaitingApproval", "RenewingSigner",
+			"A new RA signer certificate was requested and is waiting for approval on the CA. The current RA certificate keeps signing until then.")
 	} else {
 		log.Error(err, "RA signer renewal failed; continuing with the current RA certificate, will retry")
+		o.recordEvent(issuerObject, corev1.EventTypeWarning, "RASignerRenewalFailed", "RenewingSigner",
+			"Renewing the RA signer certificate failed and will be retried. The current RA certificate keeps signing. Error: %s", sanitizeError(err))
 	}
 	return nil
 }
@@ -568,18 +594,44 @@ func (o *Issuer) lockSigner(ctx context.Context, nn types.NamespacedName) (func(
 
 // renewDelegatedSigners periodically retries RA signer renewal (including polling a
 // pending renewal) for every Delegated issuer that manages its own signer Secret.
+// Check every 30 seconds.
 func (o *Issuer) renewDelegatedSigners(ctx context.Context) error {
-	ticker := time.NewTicker(raRenewalInterval)
+
+	ticker := time.NewTicker(raPendingPollInterval)
 	defer ticker.Stop()
+
+	var lastFullRenewal time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
-			o.renewAllDelegatedSigners(ctx)
+		case now := <-ticker.C:
+			isPending := o.hasPendingEnrollment(ctx)
+			timeSinceLastFull := now.Sub(lastFullRenewal)
+
+			// Execute if an enrollment is pending OR if 10 minutes have passed
+			if isPending || timeSinceLastFull >= raRenewalInterval {
+				o.renewAllDelegatedSigners(ctx)
+				lastFullRenewal = time.Now()
+			}
 		}
 	}
+}
+
+// hasPendingEnrollment reports whether any managed pending-enrollment Secret
+// exists. It reads from the informer cache, so it costs no API call.
+func (o *Issuer) hasPendingEnrollment(ctx context.Context) bool {
+	var secrets corev1.SecretList
+	if err := o.client.List(ctx, &secrets, client.MatchingLabels{managedByLabelKey: managedByLabelValue}); err != nil {
+		return false
+	}
+	for i := range secrets.Items {
+		if strings.HasSuffix(secrets.Items[i].Name, pendingSecretSuffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Issuer) renewAllDelegatedSigners(ctx context.Context) {
@@ -647,6 +699,14 @@ func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerOb
 	err = o.client.Get(ctx, pendingName, &pendingSecret)
 	switch {
 	case err == nil:
+		// A pending enrollment requested with an older configuration would, once
+		// approved, produce a certificate that no longer matches the Issuer. A
+		// pending Secret without the annotation predates it and is kept as before.
+		if have, ok := pendingSecret.Annotations[raConfigHashAnnotation]; ok && have != raConfigHash(cfg) {
+			ctrl.LoggerFrom(ctx).Info("RA configuration changed while an enrollment was pending; discarding it and starting a new one", "secret", pendingName.String())
+			o.DeletePendingSecret(ctx, pendingName)
+			return o.StartNewRABootstrap(ctx, issuerObject, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
+		}
 		bootstrapCert, raKey, txID, perr := ParsePendingSecret(pendingSecret)
 		if perr != nil {
 			return nil, nil, perr
@@ -776,7 +836,7 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, issuerObject issuerapi
 	// reconcile finds it and calls PollPendingRAEnrollment, which can retrieve the
 	// already-issued certificate from the CA using the same transaction ID, instead of
 	// silently starting a brand new enrollment.
-	if err := o.SavePendingSecret(ctx, issuerObject, pendingName, bootstrapCert, raKey, transactionID); err != nil {
+	if err := o.SavePendingSecret(ctx, issuerObject, pendingName, bootstrapCert, raKey, transactionID, raConfigHash(cfg)); err != nil {
 		return nil, nil, fmt.Errorf("failed to save pending enrollment state: %w", err)
 	}
 
@@ -912,7 +972,7 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 	return signedData.Finish()
 }
 
-func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID) error {
+func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID, configHash string) error {
 	resourceName := name.Name
 	resourceName = strings.TrimSuffix(resourceName, "-pending")
 	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
@@ -934,6 +994,7 @@ func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.I
 		annotations["scep.hshade.io/issuer-namespace"] = name.Namespace
 	}
 
+	annotations[raConfigHashAnnotation] = configHash
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name.Name,
