@@ -578,11 +578,17 @@ func (o *Issuer) tolerateRenewalError(ctx context.Context, issuerObject issuerap
 	}
 
 	log := ctrl.LoggerFrom(ctx).WithValues("secret", nn.String())
-	if errors.Is(err, errStillPending) {
+	switch {
+	case errors.Is(err, errStillPending):
 		log.Info("RA signer renewal is awaiting approval; continuing with the current RA certificate")
 		o.recordEvent(issuerObject, corev1.EventTypeNormal, "RASignerAwaitingApproval",
 			"A new RA signer certificate was requested and is waiting for approval on the CA. The current RA certificate keeps signing until then.")
-	} else {
+	case errors.As(err, &raRejectedErr{}):
+		// Already logged once, when the CA rejected the request.
+		log.V(1).Info("RA signer renewal was rejected by the CA and is not retried; continuing with the current RA certificate", "reason", sanitizeError(err))
+		o.recordEvent(issuerObject, corev1.EventTypeWarning, "RASignerRenewalRejected",
+			"The CA rejected the new RA signer certificate request. It is not retried until the RA configuration or the challenge password changes, or the pending Secret is deleted. The current RA certificate keeps signing. Error: %s", sanitizeError(err))
+	default:
 		log.Error(err, "RA signer renewal failed; continuing with the current RA certificate, will retry")
 		o.recordEvent(issuerObject, corev1.EventTypeWarning, "RASignerRenewalFailed",
 			"Renewing the RA signer certificate failed and will be retried. The current RA certificate keeps signing. Error: %s", sanitizeError(err))
@@ -702,12 +708,22 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 	defer cancel()
 
 	if err := o.EnsureDelegatingSignerSecret(attemptCtx, issuerObject, spec, spec.DelegatedSignerConfiguration, namespace, secretName); err != nil {
-		if errors.Is(err, errStillPending) {
+		switch {
+		case errors.Is(err, errStillPending):
 			log.V(1).Info("RA signer enrollment is still awaiting approval")
-		} else {
+			if firstEnrollment {
+				o.kickIssuer(ctx, issuerObject)
+			}
+		case errors.As(err, &signer.PermanentError{}):
+			log.V(1).Info("RA signer enrollment is not retried", "reason", sanitizeError(err))
+		default:
 			log.Error(err, "RA signer renewal failed")
 		}
 		return
+	}
+
+	if firstEnrollment {
+		o.kickIssuer(ctx, issuerObject)
 	}
 
 	if firstEnrollment {
@@ -719,37 +735,54 @@ func (o *Issuer) renewDelegatedSigner(ctx context.Context, issuerObject issuerap
 
 // Signature accept *api.DelegatedSignerConfiguration
 func (o *Issuer) BootstrapDelegatingSignerIdentity(ctx context.Context, issuerObject issuerapi.Issuer, issuerSpec *api.IssuerSpec, namespace, secretName string, cfg *api.DelegatedSignerConfiguration, challengePassword string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	pendingName := types.NamespacedName{Namespace: namespace, Name: secretName + pendingSecretSuffix}
+
+	var pendingSecret corev1.Secret
+	pendingErr := o.client.Get(ctx, pendingName, &pendingSecret)
+	if pendingErr != nil && !apierrors.IsNotFound(pendingErr) {
+		return nil, nil, fmt.Errorf("failed to check for pending enrollment secret: %w", pendingErr)
+	}
+	hasPending := pendingErr == nil
+
+	// A request the CA rejected is not sent again while nothing has changed. This is
+	// checked before talking to the CA at all, so a rejected issuer costs it nothing.
+	rejection := raNotRejected
+	if hasPending {
+		rejection = raRejectionStateOf(&pendingSecret, cfg, challengePassword)
+		if rejection == raRejectedUnchanged {
+			return nil, nil, raRejectedError(&pendingSecret, pendingSecret.Annotations[raRejectedReasonAnnotation])
+		}
+	}
+
 	scepClient, caCerts, caCert, err := GetSCEPClient(ctx, issuerSpec)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	pendingName := types.NamespacedName{Namespace: namespace, Name: secretName + pendingSecretSuffix}
-
-	var pendingSecret corev1.Secret
-	err = o.client.Get(ctx, pendingName, &pendingSecret)
-	switch {
-	case err == nil:
-		// A pending enrollment requested with an older configuration would, once
-		// approved, produce a certificate that no longer matches the Issuer. A
-		// pending Secret without the annotation predates it and is kept as before.
-		if have, ok := pendingSecret.Annotations[raConfigHashAnnotation]; ok && have != raConfigHash(cfg) {
-			ctrl.LoggerFrom(ctx).Info("RA configuration changed while an enrollment was pending; discarding it and starting a new one", "secret", pendingName.String())
-			o.DeletePendingSecret(ctx, pendingName)
-			return o.StartNewRABootstrap(ctx, issuerObject, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
-		}
-		bootstrapCert, raKey, txID, perr := ParsePendingSecret(pendingSecret)
-		if perr != nil {
-			return nil, nil, perr
-		}
-		return o.PollPendingRAEnrollment(ctx, scepClient, caCerts, caCert, bootstrapCert, raKey, txID, pendingName)
-
-	case apierrors.IsNotFound(err):
+	if !hasPending {
 		return o.StartNewRABootstrap(ctx, issuerObject, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
-
-	default:
-		return nil, nil, fmt.Errorf("failed to check for pending enrollment secret: %w", err)
 	}
+
+	// A pending enrollment requested with an older configuration would, once
+	// approved, produce a certificate that no longer matches the Issuer, and one the
+	// CA rejected is worth repeating once the configuration or the challenge password
+	// changed. A pending Secret without the config annotation predates it and is kept.
+	if have, ok := pendingSecret.Annotations[raConfigHashAnnotation]; rejection == raRejectedChanged || (ok && have != raConfigHash(cfg)) {
+		ctrl.LoggerFrom(ctx).Info("RA configuration or challenge password changed since the pending enrollment was requested; discarding it and starting a new one", "secret", pendingName.String())
+		o.DeletePendingSecret(ctx, pendingName)
+		return o.StartNewRABootstrap(ctx, issuerObject, scepClient, caCerts, caCert, cfg, challengePassword, pendingName)
+	}
+
+	bootstrapCert, raKey, txID, perr := ParsePendingSecret(pendingSecret)
+	if perr != nil {
+		return nil, nil, perr
+	}
+	cert, key, err := o.PollPendingRAEnrollment(ctx, scepClient, caCerts, caCert, bootstrapCert, raKey, txID, pendingName)
+	var rejected raRejection
+	if errors.As(err, &rejected) {
+		return nil, nil, o.rejectEnrollment(ctx, &pendingSecret, cfg, challengePassword, rejected.reason)
+	}
+	return cert, key, err
 }
 
 // GetSCEPClient builds a SCEP client with its own *http.Client, rather than the
@@ -867,14 +900,19 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, issuerObject issuerapi
 	// reconcile finds it and calls PollPendingRAEnrollment, which can retrieve the
 	// already-issued certificate from the CA using the same transaction ID, instead of
 	// silently starting a brand new enrollment.
-	if err := o.SavePendingSecret(ctx, issuerObject, pendingName, bootstrapCert, raKey, transactionID, raConfigHash(cfg)); err != nil {
+	pendingSecret, err := o.SavePendingSecret(ctx, issuerObject, pendingName, bootstrapCert, raKey, transactionID, raConfigHash(cfg))
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to save pending enrollment state: %w", err)
 	}
 
 	scepResponseBytes, err := scepClient.PKIOperation(ctx, rawPKIMessage)
 	if err != nil {
+		if reason, ok := httpRejection(err); ok {
+			return nil, nil, o.rejectEnrollment(ctx, pendingSecret, cfg, challengePassword, reason)
+		}
 		return nil, nil, fmt.Errorf("PKIOperation failed: %s", sanitizeError(err))
 	}
+
 	scepResponseMessage, err := scep.ParsePKIMessage(scepResponseBytes, scep.WithCACerts(caCerts))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse SCEP response: %w", err)
@@ -882,8 +920,7 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, issuerObject issuerapi
 
 	switch scepResponseMessage.PKIStatus {
 	case scep.FAILURE:
-		o.DeletePendingSecret(ctx, pendingName)
-		return nil, nil, fmt.Errorf("RA bootstrap enrollment FAILED: %s", scepResponseMessage.FailInfo)
+		return nil, nil, o.rejectEnrollment(ctx, pendingSecret, cfg, challengePassword, fmt.Sprint(scepResponseMessage.FailInfo))
 	case scep.PENDING:
 		// Already persisted above; nothing more to save.
 		return nil, nil, errStillPending
@@ -943,6 +980,9 @@ func (o *Issuer) PollPendingRAEnrollment(ctx context.Context, scepClient scepcli
 	}
 	respBytes, err := scepClient.PKIOperation(ctx, rawPoll)
 	if err != nil {
+		if reason, ok := httpRejection(err); ok {
+			return nil, nil, raRejection{reason: reason}
+		}
 		return nil, nil, fmt.Errorf("PKIOperation (poll) failed: %s", sanitizeError(err))
 	}
 	respMsg, err := scep.ParsePKIMessage(respBytes, scep.WithCACerts(caCerts))
@@ -952,8 +992,7 @@ func (o *Issuer) PollPendingRAEnrollment(ctx context.Context, scepClient scepcli
 
 	switch respMsg.PKIStatus {
 	case scep.FAILURE:
-		o.DeletePendingSecret(ctx, pendingName)
-		return nil, nil, fmt.Errorf("RA bootstrap enrollment FAILED: %s", respMsg.FailInfo)
+		return nil, nil, raRejection{reason: fmt.Sprint(respMsg.FailInfo)}
 	case scep.PENDING:
 		return nil, nil, errStillPending
 	}
@@ -1003,7 +1042,7 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 	return signedData.Finish()
 }
 
-func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID, configHash string) error {
+func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID, configHash string) (*corev1.Secret, error) {
 	resourceName := name.Name
 	resourceName = strings.TrimSuffix(resourceName, "-pending")
 	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
@@ -1041,12 +1080,12 @@ func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.I
 		},
 	}
 	if err := controllerutil.SetControllerReference(issuerObject, secret, o.scheme); err != nil {
-		return fmt.Errorf("failed to set owner reference on pending secret: %w", err)
+		return nil, fmt.Errorf("failed to set owner reference on pending secret: %w", err)
 	}
 	if err := o.client.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+		return nil, err
 	}
-	return nil
+	return secret, nil
 }
 
 func ParsePendingSecret(secret corev1.Secret) (*x509.Certificate, *rsa.PrivateKey, scep.TransactionID, error) {
