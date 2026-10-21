@@ -23,37 +23,25 @@ This controller supports two enrollment modes:
 ## Table of Contents
 
 * [Features](#features)
-
 * [Architecture and Enrollment Modes](#architecture-and-enrollment-modes)
-
 * [Installation](#installation)
-
 * [Usage Examples](#usage-examples)
-
   * [Delegated Mode](#1-delegated-mode-with-ra-bootstrap)
-
   * [Direct Mode](#2-direct-mode)
-
 * [Security Considerations](#security-considerations)
-
 * [Development and Contributing](#development-and-contributing)
-
 * [License](#license)
 
 ## Features
 
 * Integrates SCEP certificate enrollment with
   [cert-manager](https://cert-manager.io/).
-
 * Supports namespaced `Issuer` and cluster-scoped `ClusterIssuer`
   resources.
-
 * Supports delegated enrollment using a Registration Authority (RA)
   Agent certificate.
-
 * Supports direct enrollment for SCEP endpoints that do not require an
   established trusted signer or challenge-password authentication.
-
 * Distributed as an OCI Helm chart hosted on GitHub Container Registry
   (GHCR).
 
@@ -117,12 +105,9 @@ Container Registry (GHCR).
 ### Prerequisites
 
 * A Kubernetes cluster.
-
 * Helm 3.8.0 or later (for OCI registry support).
-
 * [cert-manager](https://cert-manager.io/docs/installation/) installed
   and running.
-
 * A reachable SCEP endpoint configured for the enrollment mode you
   intend to use.
 
@@ -275,18 +260,14 @@ the delegated example, but set `issuerRef.name` to `direct-scep-issuer`.
   This disables server certificate verification and should not be used
   in production unless you have explicitly assessed and accepted the
   risk. Configure TLS verification appropriately for your environment.
-
 * **Bootstrap challenge:** Restrict access to the RA bootstrap Secret
   using Kubernetes RBAC. Do not commit real challenge passwords to
   source control.
-
 * **RA identity:** Protect the RA Agent private key and restrict
   access to the Secret that stores it.
-
 * **Direct mode:** Use only with SCEP endpoints whose authentication
   and approval policies are appropriate for requests signed by a
   temporary, untrusted identity.
-
 * **Issuance policy:** Ensure the SCEP server's approval and
   certificate issuance policies are appropriate for the certificates
   being requested.
