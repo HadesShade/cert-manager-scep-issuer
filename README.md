@@ -13,10 +13,10 @@ connecting Kubernetes workloads to enterprise Public Key Infrastructure
 
 This controller supports two enrollment modes:
 
-* **Delegated mode** --- uses a persistent Registration Authority (RA)
+* **Delegated mode** - uses a persistent Registration Authority (RA)
   Agent identity to authenticate certificate requests.
 
-* **Direct mode** --- uses a temporary signing identity for SCEP
+* **Direct mode** - uses a temporary signing identity for SCEP
   endpoints that do not enforce signer-trust or challenge-password
   checks.
 
