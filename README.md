@@ -4,6 +4,8 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-compatible-success.svg)
 ![cert-manager](https://img.shields.io/badge/cert--manager-v1.x-orange.svg)
 
+> **Note:** This repository is a fork of the official [cert-manager/sample-external-issuer](https://github.com/cert-manager/sample-external-issuer), heavily modified to support SCEP certificate enrollment.
+
 A **Kubernetes external issuer for cert-manager that enables certificate
 enrollment through SCEP (Simple Certificate Enrollment Protocol)**,
 connecting Kubernetes workloads to enterprise Public Key Infrastructure
@@ -11,36 +13,49 @@ connecting Kubernetes workloads to enterprise Public Key Infrastructure
 
 This controller supports two enrollment modes:
 
--   **Delegated mode** --- uses a persistent Registration Authority (RA)
-    Agent identity to authenticate certificate requests.
--   **Direct mode** --- uses a temporary signing identity for SCEP
-    endpoints that do not enforce signer-trust or challenge-password
-    checks.
+* **Delegated mode** --- uses a persistent Registration Authority (RA)
+  Agent identity to authenticate certificate requests.
+
+* **Direct mode** --- uses a temporary signing identity for SCEP
+  endpoints that do not enforce signer-trust or challenge-password
+  checks.
 
 ## Table of Contents
 
--   [Features](#features)
--   [Architecture and Enrollment Modes](#architecture-and-enrollment-modes)
--   [Installation](#installation)
--   [Usage Examples](#usage-examples)
-    -   [Delegated Mode](#1-delegated-mode-with-ra-bootstrap)
-    -   [Direct Mode](#2-direct-mode)
--   [Security Considerations](#security-considerations)
--   [Development and Contributing](#development-and-contributing)
--   [License](#license)
+* [Features](#features)
+
+* [Architecture and Enrollment Modes](#architecture-and-enrollment-modes)
+
+* [Installation](#installation)
+
+* [Usage Examples](#usage-examples)
+
+  * [Delegated Mode](#1-delegated-mode-with-ra-bootstrap)
+
+  * [Direct Mode](#2-direct-mode)
+
+* [Security Considerations](#security-considerations)
+
+* [Development and Contributing](#development-and-contributing)
+
+* [License](#license)
 
 ## Features
 
--   Integrates SCEP certificate enrollment with
-    [cert-manager](https://cert-manager.io/).
--   Supports namespaced `Issuer` and cluster-scoped `ClusterIssuer`
-    resources.
--   Supports delegated enrollment using a Registration Authority (RA)
-    Agent certificate.
--   Supports direct enrollment for SCEP endpoints that do not require an
-    established trusted signer or challenge-password authentication.
--   Distributed as an OCI Helm chart hosted on GitHub Container Registry
-    (GHCR).
+* Integrates SCEP certificate enrollment with
+  [cert-manager](https://cert-manager.io/).
+
+* Supports namespaced `Issuer` and cluster-scoped `ClusterIssuer`
+  resources.
+
+* Supports delegated enrollment using a Registration Authority (RA)
+  Agent certificate.
+
+* Supports direct enrollment for SCEP endpoints that do not require an
+  established trusted signer or challenge-password authentication.
+
+* Distributed as an OCI Helm chart hosted on GitHub Container Registry
+  (GHCR).
 
 ## Architecture and Enrollment Modes
 
@@ -52,12 +67,12 @@ CSR attributes without invalidating its signature.
 Choose the enrollment mode based on the authentication requirements of
 your SCEP server.
 
-| Capability | Delegated mode | Direct mode |
-| :--- | :--- | :--- |
-| **SCEP request signer** | Persistent RA Agent identity | Temporary self-signed identity per request |
-| **Established signer trust** | Intended for endpoints that require a trusted signer | Not provided by the temporary identity |
-| **`challengeSecretRef`** | Used for RA bootstrap | Not supported |
-| **Intended endpoint** | SCEP servers requiring an established signer identity | Endpoints that do not enforce signer-trust or challenge-password checks |
+| Capability | Delegated mode | Direct mode | 
+| ----- | ----- | ----- | 
+| **SCEP request signer** | Persistent RA Agent identity | Temporary self-signed identity per request | 
+| **Established signer trust** | Intended for endpoints that require a trusted signer | Not provided by the temporary identity | 
+| **`challengeSecretRef`** | Used for RA bootstrap | Not supported | 
+| **Intended endpoint** | SCEP servers requiring an established signer identity | Endpoints that do not enforce signer-trust or challenge-password checks | 
 
 ### 1. Delegated Mode
 
@@ -101,18 +116,21 @@ Container Registry (GHCR).
 
 ### Prerequisites
 
--   A Kubernetes cluster.
--   Helm 3.8.0 or later (for OCI registry support).
--   [cert-manager](https://cert-manager.io/docs/installation/) installed
-    and running.
--   A reachable SCEP endpoint configured for the enrollment mode you
-    intend to use.
+* A Kubernetes cluster.
+
+* Helm 3.8.0 or later (for OCI registry support).
+
+* [cert-manager](https://cert-manager.io/docs/installation/) installed
+  and running.
+
+* A reachable SCEP endpoint configured for the enrollment mode you
+  intend to use.
 
 ### Install via Helm
 
 Install chart version `0.1.0` from GHCR:
 
-```bash
+```
 helm install scep-issuer \
   oci://ghcr.io/hadesshade/charts/scep-issuer \
   --version 0.1.0 \
@@ -135,7 +153,7 @@ environment.
 Create a Kubernetes Secret containing the challenge password used to
 bootstrap the RA Agent certificate:
 
-```yaml
+```
 apiVersion: v1
 kind: Secret
 metadata:
@@ -148,7 +166,7 @@ stringData:
 
 Apply it:
 
-```bash
+```
 kubectl apply -f scep-ra-challenge.yaml
 ```
 
@@ -157,7 +175,7 @@ kubectl apply -f scep-ra-challenge.yaml
 The following example uses `delegatedSignerConfiguration` to define the
 RA Agent certificate identity.
 
-```yaml
+```
 apiVersion: scep.hshade.io/v1alpha1
 kind: Issuer
 metadata:
@@ -188,7 +206,7 @@ If you already have an appropriate RA TLS Secret, configure
 
 Apply the manifest:
 
-```bash
+```
 kubectl apply -f issuer.yaml
 ```
 
@@ -196,7 +214,7 @@ kubectl apply -f issuer.yaml
 
 Create a cert-manager `Certificate` referencing the external issuer:
 
-```yaml
+```
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -214,7 +232,7 @@ spec:
 
 Apply the manifest and check the certificate status:
 
-```bash
+```
 kubectl apply -f certificate.yaml
 kubectl get certificate my-app-cert -n default
 kubectl describe certificate my-app-cert -n default
@@ -229,7 +247,7 @@ enrollment according to the delegated-mode configuration.
 Use direct mode only when the SCEP endpoint does not enforce established
 signer trust or challenge-password authentication.
 
-```yaml
+```
 apiVersion: scep.hshade.io/v1alpha1
 kind: Issuer
 metadata:
@@ -244,7 +262,7 @@ spec:
 
 Apply the manifest:
 
-```bash
+```
 kubectl apply -f direct-issuer.yaml
 ```
 
@@ -253,21 +271,25 @@ the delegated example, but set `issuerRef.name` to `direct-scep-issuer`.
 
 ## Security Considerations
 
--   **TLS verification:** The examples set `insecureSkipVerify: true`.
-    This disables server certificate verification and should not be used
-    in production unless you have explicitly assessed and accepted the
-    risk. Configure TLS verification appropriately for your environment.
--   **Bootstrap challenge:** Restrict access to the RA bootstrap Secret
-    using Kubernetes RBAC. Do not commit real challenge passwords to
-    source control.
--   **RA identity:** Protect the RA Agent private key and restrict
-    access to the Secret that stores it.
--   **Direct mode:** Use only with SCEP endpoints whose authentication
-    and approval policies are appropriate for requests signed by a
-    temporary, untrusted identity.
--   **Issuance policy:** Ensure the SCEP server's approval and
-    certificate issuance policies are appropriate for the certificates
-    being requested.
+* **TLS verification:** The examples set `insecureSkipVerify: true`.
+  This disables server certificate verification and should not be used
+  in production unless you have explicitly assessed and accepted the
+  risk. Configure TLS verification appropriately for your environment.
+
+* **Bootstrap challenge:** Restrict access to the RA bootstrap Secret
+  using Kubernetes RBAC. Do not commit real challenge passwords to
+  source control.
+
+* **RA identity:** Protect the RA Agent private key and restrict
+  access to the Secret that stores it.
+
+* **Direct mode:** Use only with SCEP endpoints whose authentication
+  and approval policies are appropriate for requests signed by a
+  temporary, untrusted identity.
+
+* **Issuance policy:** Ensure the SCEP server's approval and
+  certificate issuance policies are appropriate for the certificates
+  being requested.
 
 ## Development and Contributing
 
@@ -277,25 +299,25 @@ This project is built using [Kubebuilder](https://book.kubebuilder.io/).
 
 Generate manifests and deepcopy code:
 
-```bash
+```
 make manifests generate
 ```
 
 Run tests:
 
-```bash
+```
 make test
 ```
 
 Run the controller locally using your current kubeconfig context:
 
-```bash
+```
 make run
 ```
 
 ### Building and pushing images
 
-```bash
+```
 make docker-build docker-push IMG=<your-registry>/scep-issuer:v0.1.0
 ```
 
