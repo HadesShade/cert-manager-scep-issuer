@@ -77,6 +77,14 @@ const (
 
 	// maxErrorMessageLen bounds error text stored in status conditions.
 	maxErrorMessageLen = 512
+
+	// The self-signed RA bootstrap certificate signs every SCEP request and poll
+	// of a pending enrollment, and is kept in the pending Secret until the CA
+	// approves. It is backdated so a CA whose clock runs slightly behind does not see
+	// it as not yet valid, and it outlives a slow manual approval, because a CA that
+	// checks the signer certificate's validity would otherwise refuse the poll.
+	raBootstrapBackdate = 24 * time.Hour
+	raBootstrapLifetime = 45 * 24 * time.Hour
 )
 
 var (
@@ -132,6 +140,11 @@ type Issuer struct {
 // +kubebuilder:rbac:groups=certificates.k8s.io,resources=certificatesigningrequests/status,verbs=patch
 // +kubebuilder:rbac:groups=certificates.k8s.io,resources=signers,verbs=sign,resourceNames=clusterissuers.scep.hshade.io/*;issuers.scep.hshade.io/*
 
+// raBootstrapValidity returns the NotBefore/NotAfter of the RA bootstrap certificate.
+func raBootstrapValidity(now time.Time) (notBefore, notAfter time.Time) {
+	return now.Add(-raBootstrapBackdate), now.Add(raBootstrapLifetime)
+}
+
 func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	s.client = mgr.GetClient()
 	s.scheme = mgr.GetScheme()
@@ -178,7 +191,7 @@ func (o *Issuer) GetIssuerDetails(issuerObject issuerapi.Issuer) (*api.IssuerSpe
 }
 
 func delegatedSignerSecretName(issuerObject issuerapi.Issuer) string {
-	return fmt.Sprintf("%s-delegated-signer", issuerObject.GetName())
+	return fmt.Sprintf("%s-ra", issuerObject.GetName())
 }
 
 func DelegatedSignerSecretName(issuerObject issuerapi.Issuer) string {
@@ -399,7 +412,7 @@ func (o *Issuer) EnsureDelegatingSignerSecret(ctx context.Context, issuerObject 
 
 	// Build tracking annotations dynamically
 	resourceName := secretName
-	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+	resourceName = strings.TrimSuffix(resourceName, "-ra")
 
 	isClusterIssuer := false
 	if namespace == o.ClusterResourceNamespace || namespace == "" {
@@ -870,13 +883,15 @@ func (o *Issuer) StartNewRABootstrap(ctx context.Context, issuerObject issuerapi
 		return nil, nil, err
 	}
 
+	notBefore, notAfter := raBootstrapValidity(time.Now())
 	bootstrapTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      subject,
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
+
 	bootstrapCertDER, err := x509.CreateCertificate(rand.Reader, bootstrapTemplate, bootstrapTemplate, &raKey.PublicKey, raKey)
 	if err != nil {
 		return nil, nil, err
@@ -1045,7 +1060,7 @@ func BuildCertPollMessage(caCert, signerCert *x509.Certificate, signerKey *rsa.P
 func (o *Issuer) SavePendingSecret(ctx context.Context, issuerObject issuerapi.Issuer, name types.NamespacedName, bootstrapCert *x509.Certificate, raKey *rsa.PrivateKey, txID scep.TransactionID, configHash string) (*corev1.Secret, error) {
 	resourceName := name.Name
 	resourceName = strings.TrimSuffix(resourceName, "-pending")
-	resourceName = strings.TrimSuffix(resourceName, "-delegated-signer")
+	resourceName = strings.TrimSuffix(resourceName, "-ra")
 
 	isClusterIssuer := false
 	if name.Namespace == o.ClusterResourceNamespace || name.Namespace == "" {

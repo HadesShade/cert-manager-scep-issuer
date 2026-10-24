@@ -4,7 +4,7 @@ metadata:
   name: scep-challenge-secret
 type: Opaque
 stringData:
-  password: "SecretChallenge1"
+  password: "SecretChallenge"
 ---
 apiVersion: scep.hshade.io/v1alpha1
 kind: Issuer
