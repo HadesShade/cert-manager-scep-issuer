@@ -1,6 +1,6 @@
 # cert-manager SCEP External Issuer
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-v0.1.0-blue.svg)
 ![Kubernetes](https://img.shields.io/badge/kubernetes-compatible-success.svg)
 ![cert-manager](https://img.shields.io/badge/cert--manager-v1.x-orange.svg)
 
@@ -113,12 +113,12 @@ Container Registry (GHCR).
 
 ### Install via Helm
 
-Install chart version `0.1.0` from GHCR:
+Install chart version `v0.1.0` from GHCR:
 
 ```
 helm install scep-issuer \
   oci://ghcr.io/hadesshade/charts/scep-issuer \
-  --version 0.1.0 \
+  --version v0.1.0 \
   --namespace cert-manager
 ```
 
