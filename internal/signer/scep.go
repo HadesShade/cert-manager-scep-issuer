@@ -20,6 +20,10 @@ import (
 	"github.com/smallstep/scep"
 )
 
+// leafPendingPollInterval is how often a leaf CertificateRequest is retried while
+// the CA still holds it for manual approval.
+const leafPendingPollInterval = 30 * time.Second
+
 type SCEPSigner struct {
 	IssuerSpec *api.IssuerSpec
 	SecretData map[string][]byte
@@ -115,7 +119,7 @@ func (s *SCEPSigner) signDirect(ctx context.Context, scepClient scepclient.Clien
 		// is recognized; the underlying CA rejection still needs a config fix.
 		return nil, signer.PermanentError{Err: fmt.Errorf("CA rejected direct enrollment: %s", respMsg.FailInfo)}
 	case scep.PENDING:
-		return nil, fmt.Errorf("direct enrollment is PENDING. Polling direct ephemeral requests is currently unsupported")
+		return nil, signer.PermanentError{Err: fmt.Errorf("direct enrollment is PENDING. Polling direct ephemeral requests is currently unsupported, configure the CA to auto-approve or use Delegated mode")}
 	}
 
 	if err := respMsg.DecryptPKIEnvelope(ephemeralCert, ephemeralKey); err != nil {
@@ -155,7 +159,7 @@ func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Cl
 					}
 					return controllers.CertRepPEM(pollRespMsg, signerCert, signerKey, caCerts), nil
 				case scep.PENDING:
-					return nil, fmt.Errorf("enrollment still pending CA approval")
+					return nil, signer.PendingError{Err: fmt.Errorf("enrollment still pending CA approval"), RequeueAfter: leafPendingPollInterval}
 				}
 			}
 		}
@@ -180,7 +184,7 @@ func (s *SCEPSigner) signDelegated(ctx context.Context, scepClient scepclient.Cl
 		// See the matching comment in signDirect: a CA-side rejection is permanent.
 		return nil, signer.PermanentError{Err: fmt.Errorf("CA rejected delegated enrollment: %s", respMsg.FailInfo)}
 	case scep.PENDING:
-		return nil, fmt.Errorf("enrollment pending CA approval")
+		return nil, signer.PendingError{Err: fmt.Errorf("enrollment still pending CA approval"), RequeueAfter: leafPendingPollInterval}
 	}
 
 	if err := respMsg.DecryptPKIEnvelope(signerCert, signerKey); err != nil {

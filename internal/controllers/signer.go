@@ -78,6 +78,10 @@ const (
 	// maxErrorMessageLen bounds error text stored in status conditions.
 	maxErrorMessageLen = 512
 
+	// maxRetryDuration bounds how long a CertificateRequest is retried, including
+	// while it waits for manual CA approval (which can take up to a month).
+	maxRetryDuration = 30 * 24 * time.Hour
+
 	// The self-signed RA bootstrap certificate signs every SCEP request and poll
 	// of a pending enrollment, and is kept in the pending Secret until the CA
 	// approves. It is backdated so a CA whose clock runs slightly behind does not see
@@ -162,7 +166,7 @@ func (s *Issuer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 		ClusterIssuerTypes: []issuerapi.Issuer{&api.ClusterIssuer{}},
 
 		FieldOwner:       "issuer.cert-manager.io",
-		MaxRetryDuration: 168 * time.Hour,
+		MaxRetryDuration: maxRetryDuration,
 
 		Sign:          s.Sign,
 		Check:         s.Check,
@@ -306,7 +310,7 @@ func (o *Issuer) Sign(ctx context.Context, cr signer.CertificateRequestObject, i
 
 	signed, err := signerObj.Sign(ctx, certDetails.CSR)
 	if err != nil {
-		return signer.PEMBundle{}, wrapSignError(err)
+		return signer.PEMBundle{}, wrapSignError(err, cr.GetCreationTimestamp().Time)
 	}
 
 	bundle, err := pki.ParseSingleCertificateChainPEM(signed)
@@ -560,10 +564,18 @@ func sanitizeError(err error) string {
 	return msg
 }
 
-func wrapSignError(err error) error {
+func wrapSignError(err error, createdAt time.Time) error {
 	wrapped := fmt.Errorf("%w: %s", errSignerSign, sanitizeError(err))
 	if errors.As(err, &signer.PermanentError{}) {
 		return signer.PermanentError{Err: wrapped}
+	}
+	var pending signer.PendingError
+	if errors.As(err, &pending) {
+		// PendingError bypasses the library's MaxRetryDuration, so enforce it here.
+		if !createdAt.IsZero() && time.Since(createdAt) > maxRetryDuration {
+			return signer.PermanentError{Err: fmt.Errorf("%w: still pending CA approval after %s, giving up", errSignerSign, maxRetryDuration)}
+		}
+		return signer.PendingError{Err: wrapped, RequeueAfter: pending.RequeueAfter}
 	}
 	return wrapped
 }
