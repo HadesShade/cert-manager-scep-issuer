@@ -89,6 +89,9 @@ const (
 	// checks the signer certificate's validity would otherwise refuse the poll.
 	raBootstrapBackdate = 24 * time.Hour
 	raBootstrapLifetime = 45 * 24 * time.Hour
+
+	// Bounds the GetCACert probe so a dead URL doesn't hold a worker for 60s.
+	scepProbeTimeout = 60 * time.Second
 )
 
 var (
@@ -213,6 +216,10 @@ func (o *Issuer) GetDelegatingSignerSecretData(ctx context.Context, secretNameSt
 		return nil, fmt.Errorf("%w, secret name: %s, reason: %v", errGetSignerSecret, secretName, "Delegating signer secret is not in TLS type")
 	}
 
+	if err := validateSignerIdentity(secret.Data, time.Now()); err != nil {
+		return nil, fmt.Errorf("%w, secret name: %s, reason: %v", errGetSignerSecret, secretName, err)
+	}
+
 	checker, err := o.HealthCheckerBuilder(issuerSpec, secret.Data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errHealthCheckerBuilder, err)
@@ -243,7 +250,40 @@ func (o *Issuer) GetChallengePassword(ctx context.Context, issuerSpec *api.Issue
 	return &s, nil
 }
 
+// Offline check: parseable RSA cert/key pair, currently within validity.
+func validateSignerIdentity(data map[string][]byte, now time.Time) error {
+	cert, _, err := ParseTLSPair(data[corev1.TLSCertKey], data[corev1.TLSPrivateKeyKey])
+	if err != nil {
+		return fmt.Errorf("invalid delegating signer identity: %v", err)
+	}
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("delegating signer certificate is not valid until %s", cert.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.Before(cert.NotAfter) {
+		return fmt.Errorf("delegating signer certificate expired at %s", cert.NotAfter.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 func (o *Issuer) Check(ctx context.Context, issuerObject issuerapi.Issuer) error {
+	if err := o.checkConfiguration(ctx, issuerObject); err != nil {
+		return err
+	}
+
+	issuerSpec, _, err := o.GetIssuerDetails(issuerObject)
+	if err != nil {
+		return err
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, scepProbeTimeout)
+	defer cancel()
+	if _, _, _, err := GetSCEPClient(probeCtx, issuerSpec); err != nil {
+		return fmt.Errorf("SCEP server %q is not usable: %w", issuerSpec.URL, err)
+	}
+	return nil
+}
+
+func (o *Issuer) checkConfiguration(ctx context.Context, issuerObject issuerapi.Issuer) error {
 	issuerSpec, namespace, err := o.GetIssuerDetails(issuerObject)
 	if err != nil {
 		return err
